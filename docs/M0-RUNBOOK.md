@@ -101,6 +101,41 @@ your passcode.
 gates the intents, and a locked-screen entry point cannot prompt — so grant it in the
 foreground before testing any Lock Screen start.
 
+### The widget extension needs its own App ID, and tools will quietly drop it
+
+If `GabbroWidgets` crashes with `EXC_BAD_ACCESS` / `SIGKILL` and a termination namespace of
+`CODESIGNING` ("Invalid Page"), that is the kernel refusing the extension's signature. It is
+an **install-time provisioning problem, not a code bug.**
+
+Why it happens: **every app extension consumes one of the 10 App IDs a free Apple ID gets
+per 7 days.** Sideloadly can strip extensions before install for exactly that reason, and if
+the app is signed while the extension's App ID was never registered, you get an invalid
+signature and a kernel kill on first use.
+
+What to check:
+
+- Whether the sideload tool is set to remove app extensions (Sideloadly offers this).
+- Whether the App ID quota is exhausted — app + widget extension is 2 of 10 per week, and
+  every re-sideload can consume more.
+- **Do not run AltStore and Sideloadly against the same app.** They overwrite each other's
+  certificates and previously-signed apps stop opening.
+
+What it costs you, and what it does not: the Live Activity and the Control Center button
+stop working, so the **locked-screen start and Lock Screen stop paths cannot be tested.**
+Everything else is unaffected — the in-app record button calls `CaptureModel.start()`
+directly rather than through `AudioRecordingIntent`, and `Activity.request` is already
+behind a `try?`. **M0's four gates do not need the extension.** Measure first, sort the
+appex signing before testing the intent paths.
+
+### Which build am I actually running?
+
+`CFBundleVersion` is stamped in CI with the run number and the short commit SHA, and it
+appears in every crash log. Check it before concluding a fix did not work — twice now a
+"still broken" report has turned out to be a build that predated the fix.
+
+The breadcrumb banner helps too: if the app shows "Previous run ended at: …" then it at
+least contains `73252be`.
+
 ### Symptoms that are not what they look like
 
 | What you see | Actual cause |

@@ -57,6 +57,23 @@ jobs:
       - name: Generate project
         run: xcodegen generate
 
+      # Stamp the build so a crash log identifies its own commit.
+      #
+      # Both earlier crash reports said `app_version: 0.1.0`, so telling "did
+      # the fix ship?" from "does the fix work?" meant comparing binary UUIDs
+      # and byte sizes. That cost a whole round trip. CFBundleVersion appears
+      # in every .ips, so put the run number and the short SHA in it.
+      - name: Stamp build version
+        run: |
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          BUILD="${{ github.run_number }}+${SHORT_SHA}"
+          echo "Stamping CFBundleVersion = $BUILD"
+          for plist in Gabbro/Info.plist GabbroWidgets/Info.plist; do
+            /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD" "$plist" \
+              || /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $BUILD" "$plist"
+          done
+          echo "BUILD_STAMP=$BUILD" >> $GITHUB_ENV
+
       # Surfaced as its own step so a FluidAudio resolution failure reads as
       # "the pinned dependency moved" rather than a compile error 20 lines
       # into a build log. It is pre-1.0 and pinned to an exact version.
@@ -126,6 +143,8 @@ jobs:
       - name: Checksum and manifest
         run: |
           echo "### Verify this build" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Build stamp (appears as \`app_version\`/build in any crash log): \`${BUILD_STAMP}\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "SHA256 of \`Gabbro.ipa\` as built:" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
