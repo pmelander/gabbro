@@ -115,7 +115,11 @@ public actor JobStore {
     private func recoverInterrupted() throws {
         var recovered = 0
         for (id, var job) in jobs where job.state == .recording || job.state == .transcribing {
-            for i in job.segments.indices {
+            // Same hazard as TranscriptionCoordinator.drain: iterating
+            // `job.segments.indices` holds a read access open across a body
+            // that mutates `job.segments`. Snapshot the count instead.
+            let segmentCount = job.segments.count
+            for i in 0..<segmentCount {
                 let url = audioDirectory.appendingPathComponent(job.segments[i].filename)
                 if let seconds = try? WAVWriter.repairHeader(at: url) {
                     job.segments[i].frameCount = Int(seconds * Double(WAVWriter.sampleRate))

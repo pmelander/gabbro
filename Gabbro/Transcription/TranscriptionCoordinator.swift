@@ -53,7 +53,25 @@ public actor TranscriptionCoordinator {
         var job = input
         var tokens: [Token] = []
 
-        for index in job.segments.indices {
+        // Snapshot the count and iterate a plain Int range. Do NOT write
+        // `for index in job.segments.indices` here.
+        //
+        // That form builds the loop sequence from a READ access to
+        // `job.segments` and holds it for the whole loop. Inside the body,
+        // `job.segments[index].transcribedFrames = ...` opens an EXCLUSIVE
+        // access to the same memory. Read overlapping write is an exclusivity
+        // violation, and because this function is async -- locals live in a
+        // heap async frame, so enforcement is dynamic rather than static --
+        // the runtime caught it and aborted the process:
+        //
+        //   swift_beginAccess -> AccessSet::insert -> fatalError -> SIGABRT
+        //   TranscriptionCoordinator.drain(job:) + 132
+        //
+        // It fired on every stop that reached this loop. A local `Int` range
+        // holds no access to `job`, so the reads and writes inside stay
+        // instantaneous and cannot overlap.
+        let segmentCount = job.segments.count
+        for index in 0..<segmentCount {
             let segment = job.segments[index]
             let url = JobStore.shared.audioDirectory.appendingPathComponent(segment.filename)
 
