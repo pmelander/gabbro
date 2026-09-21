@@ -61,6 +61,27 @@ public final class CaptureModel: RecordingControlHandling {
     public var inferenceEnabled = true
 
     public func start() async {
+        // Ask before checking. This is the foreground path, so it is the only
+        // place that CAN prompt — the Lock Screen intent cannot, which is why
+        // it only ever checks.
+        //
+        // Without this the app checked a permission it had never requested,
+        // found `.undetermined`, and told the user to grant it in Settings —
+        // where no toggle existed, because iOS does not list an app under
+        // Privacy -> Microphone until the app has actually asked.
+        switch AudioSessionManager.micPermission {
+        case .undetermined:
+            guard await AudioSessionManager.requestMicrophonePermission() else {
+                lastError = RecorderError.microphonePermissionDenied.errorDescription
+                return
+            }
+        case .denied:
+            lastError = RecorderError.microphonePermissionDenied.errorDescription
+            return
+        case .granted:
+            break
+        }
+
         do {
             try await coordinator.prepare()
             try await recorder.start()

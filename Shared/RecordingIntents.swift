@@ -25,8 +25,13 @@ public enum RecordingControl_Registry {
 
 public struct MicrophoneNotAuthorized: LocalizedError {
     public init() {}
+    /// Points at the app, not at Settings. An intent can fire before the app
+    /// has ever requested access, and in that state Settings has no toggle to
+    /// offer — iOS does not list an app under Privacy > Microphone until it
+    /// has asked. Opening the app once is the only thing that works in both
+    /// the never-asked and the denied case.
     public var errorDescription: String? {
-        "Microphone access is off. Open Gabbro and grant it in Settings."
+        "Open Gabbro once to grant microphone access, then try again."
     }
 }
 

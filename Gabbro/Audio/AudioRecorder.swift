@@ -130,8 +130,13 @@ public final class AudioRecorder: ObservableObject {
     // MARK: - Start
 
     public func start() async throws {
-        guard AudioSessionManager.hasMicrophonePermission() else {
-            throw RecorderError.microphonePermissionDenied
+        // Last line of defence. The foreground path in CaptureModel prompts
+        // before reaching here; an intent-driven start cannot prompt, so it
+        // arrives here and fails with a message that says the right thing.
+        switch AudioSessionManager.micPermission {
+        case .granted: break
+        case .undetermined: throw RecorderError.microphonePermissionNotRequested
+        case .denied: throw RecorderError.microphonePermissionDenied
         }
         // nonisolated on the actor — no await, it is a plain synchronous read.
         guard JobStore.shared.hasRoomToStart() else {
@@ -285,14 +290,21 @@ public final class AudioRecorder: ObservableObject {
 }
 
 public enum RecorderError: LocalizedError {
+    /// Explicitly refused, or refused at the prompt. Settings is the route back.
     case microphonePermissionDenied
+    /// Never requested, and we are somewhere that cannot prompt — i.e. a Lock
+    /// Screen intent. Telling the user to visit Settings here would be a dead
+    /// end: iOS has no entry to show until the app has asked.
+    case microphonePermissionNotRequested
     case insufficientStorage
     case formatUnavailable
 
     public var errorDescription: String? {
         switch self {
         case .microphonePermissionDenied:
-            "Microphone access is off. Open Gabbro and grant it in Settings."
+            "Microphone access is off. Turn it on in Settings > Privacy & Security > Microphone > Gabbro."
+        case .microphonePermissionNotRequested:
+            "Open Gabbro and press record once to grant microphone access. It cannot be granted from the Lock Screen."
         case .insufficientStorage:
             "Not enough free space to start recording."
         case .formatUnavailable:
