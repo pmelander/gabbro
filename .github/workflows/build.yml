@@ -113,11 +113,39 @@ jobs:
           fi
           echo "GabbroWidgets.appex embedded OK"
 
+      # Windows antivirus will often flag this download: a nested archive
+      # around an unsigned, zero-reputation executable is textbook heuristic
+      # bait, even though an iOS arm64 Mach-O cannot run on Windows at all.
+      # "Trust the build" is not verification, so every run publishes the
+      # checksum and a full manifest of what is inside. Compare the SHA256 of
+      # what you downloaded against this before deciding anything.
+      - name: Checksum and manifest
+        run: |
+          echo "### Verify this build" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "SHA256 of \`Gabbro.ipa\` as built:" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          shasum -a 256 Gabbro.ipa | tee -a $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "On Windows: \`certutil -hashfile Gabbro.ipa SHA256\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "<details><summary>Everything inside the .ipa</summary>" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          unzip -l Gabbro.ipa >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "</details>" >> $GITHUB_STEP_SUMMARY
+          shasum -a 256 Gabbro.ipa > Gabbro.ipa.sha256
+          echo "--- linked libraries (nothing should be unexpected) ---"
+          otool -L Payload/Gabbro.app/Gabbro | head -40
+
       - name: Upload .ipa
         uses: actions/upload-artifact@v4
         with:
           name: Gabbro-unsigned-${{ github.sha }}
-          path: Gabbro.ipa
+          path: |
+            Gabbro.ipa
+            Gabbro.ipa.sha256
           retention-days: 30
           if-no-files-found: error
 

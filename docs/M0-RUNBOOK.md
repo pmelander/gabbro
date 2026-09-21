@@ -19,6 +19,38 @@ push to main
 
 Builds expire after 7 days. Re-sideload, or let SideStore refresh on-device.
 
+### Antivirus will probably flag the download
+
+Expect it, and verify rather than either panicking or waving it through.
+
+Why it happens: the artifact is a **zip containing an `.ipa`, which is itself a zip**
+containing an ARM64 Mach-O. Nested archives wrapped around an unsigned, zero-reputation
+executable is exactly what heuristic and prevalence-based detection is built to catch. The
+binary is unsigned on purpose — signing happens at sideload time with your Apple ID, so the
+CI runner has no certificate and needs none. And the file has been seen by one person on
+earth, which some engines flag on its own.
+
+Also worth knowing: an **iOS arm64 Mach-O cannot execute on Windows**. Whatever the verdict,
+the file is inert on the machine that downloaded it.
+
+How to verify instead of trusting:
+
+1. Every CI run's summary page prints the **SHA256** of the `.ipa` as built, plus a full
+   manifest of its contents. Compare: `certutil -hashfile Gabbro.ipa SHA256`.
+2. A `Gabbro.ipa.sha256` file ships in the same artifact.
+3. The summary lists every file inside the `.ipa`. Nothing should be unexpected — the app
+   binary, the widget extension, the asset catalog, Info.plists, and the Swift runtime libs.
+4. The build log prints `otool -L` output, so the linked libraries are visible too.
+
+If the detection names a **specific** malware family rather than a generic ML or
+low-reputation verdict, stop and investigate — the one genuine third-party code path here is
+FluidAudio, pulled by SPM. It is pinned to an exact version in `project.yml` and to a commit
+in `Package.resolved`, and the resolved graph is printed in the build log.
+
+**On a corporate-managed endpoint, an AV exclusion is a policy decision, not a local
+toggle.** If this machine's antivirus is centrally managed, that is a conversation with
+whoever owns the policy rather than something to switch off.
+
 ## First install: three gates, in this order
 
 A sideloaded build does not just run. There are three separate permissions, each with a
