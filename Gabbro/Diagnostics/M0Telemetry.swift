@@ -56,13 +56,23 @@ public actor M0Telemetry {
     public func begin(jobID: UUID, inferenceEnabled: Bool) async {
         await MainActor.run { UIDevice.current.isBatteryMonitoringEnabled = true }
 
+        // Hoist the awaits out of the initialiser. Assigning to `run` opens a
+        // modify access; an `await` inside the argument list holds that access
+        // across the suspension, and any other access to `run` in that window
+        // is an exclusivity violation the runtime punishes with SIGABRT.
+        //
+        // This is the pattern that crashed every stop for five builds, and it
+        // is invisible in a backtrace: the abort surfaces wherever the SECOND
+        // access happens, not here.
+        let systemVersion = await MainActor.run { UIDevice.current.systemVersion }
+        let batteryStart = await MainActor.run { Double(UIDevice.current.batteryLevel) }
         run = Run(
             jobID: jobID,
             inferenceEnabled: inferenceEnabled,
             startedAt: Date(),
             deviceModel: Self.deviceModel(),
-            systemVersion: await MainActor.run { UIDevice.current.systemVersion },
-            batteryStart: await MainActor.run { Double(UIDevice.current.batteryLevel) }
+            systemVersion: systemVersion,
+            batteryStart: batteryStart
         )
 
         await observeLockState()
@@ -77,9 +87,12 @@ public actor M0Telemetry {
         sampler = nil
         await removeLockObservers()
 
+        // Same hoist: `finished.batteryEnd = await ...` would hold a modify
+        // access on `finished` across the suspension.
+        let batteryEnd = await MainActor.run { Double(UIDevice.current.batteryLevel) }
         guard var finished = run else { return nil }
         finished.endedAt = Date()
-        finished.batteryEnd = await MainActor.run { Double(UIDevice.current.batteryLevel) }
+        finished.batteryEnd = batteryEnd
         finished.outcome = outcome
         run = nil
 
@@ -133,14 +146,23 @@ public actor M0Telemetry {
     }
 
     private func sample() async {
+        // EVERY await is hoisted out before `run` is touched. See the note on
+        // `begin()`: `run?.samples.append(.init(..., battery: await ..., ...))`
+        // opens a modify access on `run` and then suspends inside the argument
+        // list, holding that access across the hop. This sampler fires every
+        // five seconds, so while it was suspended any concurrent noteChunk /
+        // noteBacklog / noteEvent — which drain() calls on every chunk — hit a
+        // conflicting access and the runtime aborted the process.
         let locked = await MainActor.run { !UIApplication.shared.isProtectedDataAvailable }
-        run?.samples.append(.init(
+        let battery = await MainActor.run { Double(UIDevice.current.batteryLevel) }
+        let entry = Sample(
             at: Date(),
             availableBytes: Self.availableMemoryBytes(),
             thermal: ProcessInfo.processInfo.thermalState.label,
-            battery: await MainActor.run { Double(UIDevice.current.batteryLevel) },
+            battery: battery,
             locked: locked
-        ))
+        )
+        run?.samples.append(entry)
     }
 
     /// `protectedDataWillBecomeUnavailable` is the reliable signal that the
