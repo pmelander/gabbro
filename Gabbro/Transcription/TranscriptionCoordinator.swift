@@ -16,7 +16,6 @@ public actor TranscriptionCoordinator {
 
     private let transcriber: Transcriber
     private let renderer = MarkdownRenderer()
-    private var thermal = ThermalPolicy()
 
     // MARK: Backpressure thresholds
     //
@@ -60,7 +59,7 @@ public actor TranscriptionCoordinator {
 
             var offset = segment.transcribedFrames
             while offset < segment.frameCount {
-                if thermal.shouldSuspend {
+                if ThermalPolicy.shouldSuspend {
                     job.state = .captured
                     job.promiseWithdrawnReason = "Device too warm; will finish when it cools"
                     log.notice("Thermal suspend at \(job.backlogSeconds, privacy: .public)s backlog")
@@ -78,7 +77,7 @@ public actor TranscriptionCoordinator {
                     return job
                 }
 
-                let cap = thermal.chunkCapFrames
+                let cap = ThermalPolicy.chunkCapFrames
                 let remaining = segment.frameCount - offset
                 let count = min(cap, remaining)
 
@@ -142,7 +141,7 @@ public actor TranscriptionCoordinator {
                 offset += advance
                 job.segments[index].transcribedFrames = offset
 
-                await thermal.yieldIfThrottled()
+                await ThermalPolicy.yieldIfThrottled()
             }
         }
 
@@ -154,7 +153,7 @@ public actor TranscriptionCoordinator {
 
     /// True while the 10-second-at-Stop promise still holds.
     public func promiseHolds(for job: RecordingJob) -> Bool {
-        job.backlogSeconds <= Self.promiseThresholdSeconds && !thermal.shouldSuspend
+        job.backlogSeconds <= Self.promiseThresholdSeconds && !ThermalPolicy.shouldSuspend
     }
 }
 
@@ -165,15 +164,26 @@ public actor TranscriptionCoordinator {
 /// untranscribed tail without bound and then demands it all complete in 10
 /// seconds at Stop — precisely when the device is hottest. So: degrade, then
 /// suspend, and say so out loud rather than silently.
-struct ThermalPolicy {
-    var state: ProcessInfo.ThermalState { ProcessInfo.processInfo.thermalState }
+/// Deliberately an `enum` of statics with NO stored state.
+///
+/// This was a `struct` held in a `private var thermal` on the coordinator, and
+/// that crashed the app on every stop: calling `await ThermalPolicy.yieldIfThrottled()`
+/// on a stored property holds an exclusivity access open ACROSS the suspension
+/// point, the next loop iteration reads `thermal.shouldSuspend`, the accesses
+/// overlap, and the Swift runtime traps -- swift_beginAccess -> fatalError ->
+/// SIGABRT, on a cooperative-pool thread rather than main.
+///
+/// There was never any state to store: every member below reads `ProcessInfo`
+/// live. No property, no access, no conflict.
+enum ThermalPolicy {
+    static var state: ProcessInfo.ThermalState { ProcessInfo.processInfo.thermalState }
 
-    var shouldSuspend: Bool { state == .critical }
+    static var shouldSuspend: Bool { state == .critical }
 
     /// Under `.serious`, raise the cap to 30 s and halve the duty cycle.
     /// Backlog then grows at ~0.5x real time, tripping the 8 s promise
     /// threshold after roughly 16 s of continued speech.
-    var chunkCapFrames: Int {
+    static var chunkCapFrames: Int {
         state == .serious
             ? Int(Chunking.thermalCapSeconds * Double(WAVWriter.sampleRate))
             : Chunking.capFrames
@@ -182,7 +192,7 @@ struct ThermalPolicy {
     /// The other half of the 50% duty cycle: sleep for as long as the last
     /// chunk took. Cheap approximation, and it keeps the ANE off long enough
     /// to matter on a small chassis.
-    func yieldIfThrottled() async {
+    static func yieldIfThrottled() async {
         guard state == .serious else { return }
         try? await Task.sleep(for: .milliseconds(500))
     }

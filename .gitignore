@@ -32,3 +32,8 @@ Models/
 *.wav
 *.m4a
 Fixtures/
+
+# Crash logs pulled off the device (Settings > Privacy & Security >
+# Analytics & Improvements > Analytics Data). Useful locally, but they
+# carry device identifiers and are not source.
+logs/
