@@ -8,13 +8,29 @@ Design doc: [`designs/voice-capture-obsidian-ios.md`](designs/voice-capture-obsi
 
 ## The loop
 
+**Preferred — the desktop never touches the binary:**
+
+```
+git tag v0.1.1 && git push --tags
+  -> GitHub Actions builds and publishes a Release (~10-15 min)
+  -> open the Releases page in Safari ON THE IPHONE
+  -> install the .ipa with SideStore or AltStore, free Apple ID
+  -> run the capture
+  -> Files -> On My iPhone -> Gabbro -> Diagnostics -> m0-<timestamp>.json
+```
+
+A release asset is a plain public HTTPS URL, so the phone can fetch it directly. This exists
+because a centrally managed desktop will block an unsigned, zero-reputation download by
+policy — and the right response to that is not to argue with the policy, it is to notice the
+laptop was never needed in the path. The phone is the target; let it do the download.
+
+**Via desktop, if you prefer:**
+
 ```
 push to main
   -> GitHub Actions builds an unsigned .ipa (free, public repo, ~10-15 min)
   -> download the artifact, unzip
-  -> sideload from Windows with Sideloadly / AltServer / iPASide, free Apple ID
-  -> run the capture on your phone
-  -> Files -> On My iPhone -> Gabbro -> Diagnostics -> m0-<timestamp>.json
+  -> sideload with Sideloadly / AltServer / iPASide, free Apple ID
 ```
 
 Builds expire after 7 days. Re-sideload, or let SideStore refresh on-device.

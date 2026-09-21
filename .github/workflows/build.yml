@@ -17,12 +17,16 @@ name: Build unsigned IPA
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
 concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
+
+permissions:
+  contents: write        # only used by the release step on a tag
 
 jobs:
   build:
@@ -149,13 +153,44 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
+      # A release asset is a plain public HTTPS URL, so the phone can fetch the
+      # build directly from Safari or SideStore. That keeps the binary off the
+      # Windows machine entirely -- which matters when that machine is
+      # centrally managed and its browser blocks unsigned, zero-reputation
+      # downloads by policy. Nothing is bypassed; the file simply never needs
+      # to go there.
+      #
+      # Tag a build to publish one:  git tag v0.1.1 && git push --tags
+      - name: Publish release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            Gabbro.ipa
+            Gabbro.ipa.sha256
+          generate_release_notes: true
+          body: |
+            Unsigned build for personal sideloading. Sign it yourself with a free Apple ID.
+
+            **Install straight onto the phone** (no desktop involved): open this page in
+            Safari on the iPhone, download `Gabbro.ipa`, then open it in SideStore or
+            AltStore. Or paste the asset URL into SideStore's install-from-URL field.
+
+            Expires 7 days after signing. Re-sign, or let SideStore refresh on-device.
+
+            The SHA256 is in `Gabbro.ipa.sha256` and in this run's build summary.
+
       - name: Sideload instructions
         run: |
-          echo "### Sideload this build" >> $GITHUB_STEP_SUMMARY
+          echo "### Getting this onto the phone" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "1. Download **Gabbro-unsigned-${{ github.sha }}** from the Artifacts section above." >> $GITHUB_STEP_SUMMARY
-          echo "2. Unzip it to get \`Gabbro.ipa\`." >> $GITHUB_STEP_SUMMARY
-          echo "3. Install from Windows with Sideloadly, AltServer, or iPASide, signing with your free Apple ID." >> $GITHUB_STEP_SUMMARY
-          echo "4. Expires after 7 days. Re-sideload, or let SideStore refresh it on-device." >> $GITHUB_STEP_SUMMARY
+          echo "**Preferred — phone only, no desktop:** tag a build (\`git tag v0.1.1 && git push --tags\`)," >> $GITHUB_STEP_SUMMARY
+          echo "then open the Releases page in Safari on the iPhone and install the \`.ipa\` with" >> $GITHUB_STEP_SUMMARY
+          echo "SideStore or AltStore. A release asset is a plain public URL, so a managed desktop" >> $GITHUB_STEP_SUMMARY
+          echo "never has to handle the binary." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Via desktop:** download **Gabbro-unsigned-${{ github.sha }}** above, unzip," >> $GITHUB_STEP_SUMMARY
+          echo "install with Sideloadly / AltServer / iPASide. Expect the browser to flag an" >> $GITHUB_STEP_SUMMARY
+          echo "unsigned zero-reputation binary; verify the SHA256 above rather than shrugging." >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "M0 measurements come off the phone via **Files -> On My iPhone -> Gabbro -> Diagnostics**. See \`docs/M0-RUNBOOK.md\`." >> $GITHUB_STEP_SUMMARY
