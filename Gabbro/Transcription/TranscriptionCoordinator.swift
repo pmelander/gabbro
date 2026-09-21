@@ -11,6 +11,35 @@ import OSLog
 ///
 /// The record-then-transcribe alternative guarantees the problem: minutes of
 /// ANE inference owed at exactly the moment the assertion is weakest.
+///
+/// ## Why `drain` never mutates a `RecordingJob`
+///
+/// Three successive builds aborted here with a Swift exclusivity violation:
+///
+///     swift_beginAccess -> AccessSet::insert -> fatalError -> SIGABRT
+///     TranscriptionCoordinator.drain(job:) + 132
+///
+/// Two surgical fixes were attempted from that backtrace and neither helped.
+/// The offset stayed at exactly +132 across three quite different function
+/// bodies, and the trace carried `<deduplicated_symbol>` frames — identical
+/// code folding was on, so that symbol could not be trusted to name the real
+/// function at all.
+///
+/// So this is structural rather than surgical. `drain` holds **no mutable
+/// `RecordingJob`**: it copies the segment list out once, accumulates into
+/// plain value locals, and assembles the result in a single pass at the end.
+/// There is no read-overlapping-write on any aggregate anywhere in the
+/// function, so the class of bug is gone regardless of which line the runtime
+/// was really pointing at.
+///
+/// Two rules to keep it that way:
+///  - Do not add a stored `var` to this actor and call an `async` method on
+///    it. That holds an access open across the suspension point.
+///  - Do not use a nested function or closure that captures a mutable local.
+///    Capturing makes the local escaping, which turns static exclusivity
+///    checks into dynamic ones and reintroduces exactly this failure. The
+///    helpers at the bottom are statics taking parameters by value for that
+///    reason.
 public actor TranscriptionCoordinator {
     private let log = Logger(subsystem: "com.pmelander.gabbro", category: "Coordinator")
 
@@ -36,73 +65,60 @@ public actor TranscriptionCoordinator {
         // steady-state throughput so it cannot skew the speed gate.
         let started = ContinuousClock.now
         try await transcriber.prepare()
-        let elapsed = ContinuousClock.now - started
         await M0Telemetry.shared.noteModelLoad(
-            seconds: Double(elapsed.components.seconds)
-                + Double(elapsed.components.attoseconds) / 1e18,
+            seconds: Self.seconds(ContinuousClock.now - started),
             artifactBytes: nil // M0 step 1: record the real artifact size here.
         )
     }
 
     /// Transcribes whatever is outstanding on this job, in chunk order.
     ///
-    /// Returns the job in its new state. Safe to call repeatedly: it resumes
-    /// from `transcribedFrames` and the recovery unit is the whole chunk.
+    /// Returns a NEW job value. Safe to call repeatedly: it resumes from
+    /// `transcribedFrames` and the recovery unit is the whole chunk.
     @discardableResult
     public func drain(job input: RecordingJob) async -> RecordingJob {
-        var job = input
+        // One immutable copy of the segment list, and plain value locals for
+        // everything that changes. Nothing below touches `input` again until
+        // `assemble` builds the result. See the type doc for why.
+        let segments = input.segments
+        var progress = segments.map(\.transcribedFrames)
+        var languages = input.detectedLanguages
         var tokens: [Token] = []
 
-        // Snapshot the count and iterate a plain Int range. Do NOT write
-        // `for index in job.segments.indices` here.
-        //
-        // That form builds the loop sequence from a READ access to
-        // `job.segments` and holds it for the whole loop. Inside the body,
-        // `job.segments[index].transcribedFrames = ...` opens an EXCLUSIVE
-        // access to the same memory. Read overlapping write is an exclusivity
-        // violation, and because this function is async -- locals live in a
-        // heap async frame, so enforcement is dynamic rather than static --
-        // the runtime caught it and aborted the process:
-        //
-        //   swift_beginAccess -> AccessSet::insert -> fatalError -> SIGABRT
-        //   TranscriptionCoordinator.drain(job:) + 132
-        //
-        // It fired on every stop that reached this loop. A local `Int` range
-        // holds no access to `job`, so the reads and writes inside stay
-        // instantaneous and cannot overlap.
-        let segmentCount = job.segments.count
-        for index in 0..<segmentCount {
-            let segment = job.segments[index]
+        for index in 0..<segments.count {
+            let segment = segments[index]
             let url = JobStore.shared.audioDirectory.appendingPathComponent(segment.filename)
+            var offset = progress[index]
 
-            var offset = segment.transcribedFrames
             while offset < segment.frameCount {
+                let backlog = Self.backlogSeconds(segments: segments, progress: progress)
+
                 if ThermalPolicy.shouldSuspend {
-                    job.state = .captured
-                    job.promiseWithdrawnReason = "Device too warm; will finish when it cools"
-                    log.notice("Thermal suspend at \(job.backlogSeconds, privacy: .public)s backlog")
-                    await M0Telemetry.shared.noteEvent(
-                        "thermal suspend at \(Int(job.backlogSeconds))s backlog"
+                    log.notice("Thermal suspend at \(backlog, privacy: .public)s backlog")
+                    await M0Telemetry.shared.noteEvent("thermal suspend at \(Int(backlog))s backlog")
+                    return Self.assemble(
+                        input, progress: progress, languages: languages, transcript: nil,
+                        state: .captured, reason: "Device too warm; will finish when it cools"
                     )
-                    return job
                 }
-                if job.backlogSeconds > Self.abandonThresholdSeconds {
-                    job.state = .captured
-                    job.promiseWithdrawnReason = "Fell behind; will finish next time you open Gabbro"
+                if backlog > Self.abandonThresholdSeconds {
                     await M0Telemetry.shared.noteEvent(
-                        "backlog abandon threshold breached at \(Int(job.backlogSeconds))s"
+                        "backlog abandon threshold breached at \(Int(backlog))s"
                     )
-                    return job
+                    return Self.assemble(
+                        input, progress: progress, languages: languages, transcript: nil,
+                        state: .captured,
+                        reason: "Fell behind; will finish next time you open Gabbro"
+                    )
                 }
 
-                let cap = ThermalPolicy.chunkCapFrames
                 let remaining = segment.frameCount - offset
-                let count = min(cap, remaining)
+                let count = min(ThermalPolicy.chunkCapFrames, remaining)
 
                 // A sliver shorter than the model's useful window is not worth
                 // a disk read and an inference call. Consume it and stop.
                 guard count >= Chunking.minChunkFrames else {
-                    job.segments[index].transcribedFrames = segment.frameCount
+                    progress[index] = segment.frameCount
                     break
                 }
 
@@ -116,80 +132,113 @@ public actor TranscriptionCoordinator {
                     // measurement would flatter the design into passing.
                     let started = ContinuousClock.now
                     let result = try await transcriber.transcribe(samples: samples)
-                    let elapsed = ContinuousClock.now - started
                     await M0Telemetry.shared.noteChunk(
                         audioSeconds: Double(count) / Double(WAVWriter.sampleRate),
-                        wallSeconds: Double(elapsed.components.seconds)
-                            + Double(elapsed.components.attoseconds) / 1e18
+                        wallSeconds: Self.seconds(ContinuousClock.now - started)
                     )
-                    await M0Telemetry.shared.noteBacklog(seconds: job.backlogSeconds)
+                    await M0Telemetry.shared.noteBacklog(seconds: backlog)
 
                     tokens = OverlapMerge.merge(tokens, with: result.tokens)
-                    for code in result.languages where !job.detectedLanguages.contains(code) {
-                        job.detectedLanguages.append(code)
+                    for code in result.languages where !languages.contains(code) {
+                        languages.append(code)
                     }
                 } catch {
                     // Retry is per chunk; completed chunks are kept. Audio is
                     // always retained, so nothing here is terminal.
-                    job.state = .failed
-                    job.failureReason = error.localizedDescription
                     log.error("Chunk failed: \(error.localizedDescription, privacy: .public)")
-                    return job
+                    return Self.assemble(
+                        input, progress: progress, languages: languages, transcript: nil,
+                        state: .failed, failure: error.localizedDescription
+                    )
                 }
 
                 // Advance by the chunk minus its overlap, so the next window
                 // re-reads the tail the merge aligns on.
                 //
-                // Two ways this loop must end, and the original `max(1, ...)`
-                // honoured neither. It turned "no forward progress" into
-                // "advance one sample", so a recording shorter than about
-                // 2x the overlap ground through tens of thousands of
-                // iterations -- each a disk read, an inference call, and a
-                // merge against an ever-growing token array -- until iOS
-                // killed the app. Short recordings were the worst case, which
-                // is precisely what a test tap produces.
+                // Two ways this loop must end. An earlier version wrote
+                // `max(1, count - overlapFrames)`, which turned "no forward
+                // progress" into "advance one sample": a recording shorter
+                // than about 2x the overlap ground through tens of thousands
+                // of iterations until iOS killed the app. Short recordings
+                // were the worst case, which is what a test tap produces.
                 let advance = count - Chunking.overlapFrames
                 if count == remaining || advance <= 0 {
-                    // Either we just consumed the tail of the segment, or the
-                    // remaining audio is shorter than the overlap so there is
-                    // no next window to open. Done either way.
-                    job.segments[index].transcribedFrames = segment.frameCount
+                    progress[index] = segment.frameCount
                     break
                 }
                 offset += advance
-                job.segments[index].transcribedFrames = offset
+                progress[index] = offset
 
                 await ThermalPolicy.yieldIfThrottled()
             }
         }
 
-        job.transcript = renderer.paragraphs(from: tokens)
-        job.state = job.transcript.isEmpty ? .failed : .ready
-        if job.transcript.isEmpty { job.failureReason = "No speech detected" }
-        return job
+        let transcript = renderer.paragraphs(from: tokens)
+        return Self.assemble(
+            input, progress: progress, languages: languages, transcript: transcript,
+            state: transcript.isEmpty ? .failed : .ready,
+            failure: transcript.isEmpty ? "No speech detected" : nil
+        )
     }
 
     /// True while the 10-second-at-Stop promise still holds.
     public func promiseHolds(for job: RecordingJob) -> Bool {
         job.backlogSeconds <= Self.promiseThresholdSeconds && !ThermalPolicy.shouldSuspend
     }
+
+    // MARK: - Helpers
+    //
+    // Static, with everything passed by value. Deliberately NOT nested
+    // functions: a nested function capturing `progress` would make it
+    // escaping, turning static exclusivity checks into dynamic ones and
+    // reintroducing the crash this rewrite exists to remove.
+
+    private static func backlogSeconds(
+        segments: [RecordingJob.Segment], progress: [Int]
+    ) -> Double {
+        var total = 0.0
+        for i in 0..<min(segments.count, progress.count) {
+            total += Double(max(0, segments[i].frameCount - progress[i]))
+                / Double(WAVWriter.sampleRate)
+        }
+        return total
+    }
+
+    /// The single place a `RecordingJob` is built. One pass, no loop holding
+    /// an access, no mutation of anything the caller still owns.
+    private static func assemble(
+        _ input: RecordingJob,
+        progress: [Int],
+        languages: [String],
+        transcript: String?,
+        state: RecordingJob.State,
+        reason: String? = nil,
+        failure: String? = nil
+    ) -> RecordingJob {
+        var out = input
+        let count = min(out.segments.count, progress.count)
+        for i in 0..<count {
+            out.segments[i].transcribedFrames = progress[i]
+        }
+        out.detectedLanguages = languages
+        if let transcript { out.transcript = transcript }
+        out.state = state
+        if let reason { out.promiseWithdrawnReason = reason }
+        out.failureReason = failure
+        return out
+    }
+
+    private static func seconds(_ d: Duration) -> Double {
+        Double(d.components.seconds) + Double(d.components.attoseconds) / 1e18
+    }
 }
 
-/// Graded thermal response.
-///
-/// The source spec's flat "pause the queue on .serious" was written for
-/// record-then-transcribe. Under incremental inference a flat pause grows the
-/// untranscribed tail without bound and then demands it all complete in 10
-/// seconds at Stop — precisely when the device is hottest. So: degrade, then
-/// suspend, and say so out loud rather than silently.
 /// Deliberately an `enum` of statics with NO stored state.
 ///
-/// This was a `struct` held in a `private var thermal` on the coordinator, and
-/// that crashed the app on every stop: calling `await ThermalPolicy.yieldIfThrottled()`
-/// on a stored property holds an exclusivity access open ACROSS the suspension
-/// point, the next loop iteration reads `thermal.shouldSuspend`, the accesses
-/// overlap, and the Swift runtime traps -- swift_beginAccess -> fatalError ->
-/// SIGABRT, on a cooperative-pool thread rather than main.
+/// This was a `struct` held in a `private var thermal` on the coordinator.
+/// Calling `await thermal.yieldIfThrottled()` on a stored property holds an
+/// exclusivity access open across the suspension point — a genuine hazard,
+/// though it turned out not to be the one that was firing.
 ///
 /// There was never any state to store: every member below reads `ProcessInfo`
 /// live. No property, no access, no conflict.
@@ -207,9 +256,8 @@ enum ThermalPolicy {
             : Chunking.capFrames
     }
 
-    /// The other half of the 50% duty cycle: sleep for as long as the last
-    /// chunk took. Cheap approximation, and it keeps the ANE off long enough
-    /// to matter on a small chassis.
+    /// The other half of the 50% duty cycle: yield long enough to keep the ANE
+    /// off on a small chassis.
     static func yieldIfThrottled() async {
         guard state == .serious else { return }
         try? await Task.sleep(for: .milliseconds(500))

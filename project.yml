@@ -22,6 +22,15 @@ settings:
     # or set it here once you know your team id. Automatic signing works with
     # a free Apple ID; see README "Signing".
     CODE_SIGN_STYLE: Automatic
+    # Keep the linker from folding identical functions together.
+    #
+    # Three crash reports pointed at `TranscriptionCoordinator.drain(job:) + 132`
+    # with the offset unchanged across three different bodies, and carried
+    # `<deduplicated_symbol>` frames. Identical code folding makes a backtrace
+    # name whichever symbol sorted first, not the function that actually ran.
+    # A slightly larger binary is worth a backtrace that does not lie, and this
+    # loop has no debugger to fall back on.
+    OTHER_LDFLAGS: -Wl,-no_deduplicate
     TARGETED_DEVICE_FAMILY: "1" # iPhone only. iPad is a non-goal.
 
 packages:

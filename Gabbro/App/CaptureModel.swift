@@ -137,7 +137,13 @@ public final class CaptureModel: RecordingControlHandling {
         await updateActivity(phase: .finishing, job: job)
         Breadcrumbs.drop(Breadcrumbs.Marker.stopDrainBegin)
         if inferenceEnabled {
-            job = await coordinator.drain(job: job)
+            // Split deliberately. `job = await coordinator.drain(job: job)`
+            // assigns to a local that the right-hand side also reads, in an
+            // async function where locals live in a heap frame and get dynamic
+            // exclusivity checks. Landing the result in a separate constant
+            // first means the read and the write cannot share a window.
+            let drained = await coordinator.drain(job: job)
+            job = drained
         } else {
             // Battery-baseline run: capture and store, transcribe nothing.
             job.state = .captured
