@@ -1,0 +1,133 @@
+name: Build unsigned IPA
+
+# Windows-only development loop:
+#   push  ->  this builds an unsigned .ipa on a macOS runner
+#         ->  download the artifact
+#         ->  sideload from Windows with Sideloadly / AltServer / iPASide,
+#             signing with your free Apple ID
+#
+# Public repo, so macOS runner minutes are unlimited and free. On a private
+# repo these would burn the 10x multiplier (~200 macOS minutes/month on the
+# free tier), which is why the repo is public.
+#
+# This produces a build. It cannot run M0 — the four gates need thermals,
+# battery and memory on your actual phone, under lock. See docs/M0-RUNBOOK.md;
+# the app measures itself and writes the report to Files.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build unsigned .ipa
+    runs-on: macos-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # iOS 26 deployment target needs Xcode 26+. macos-latest has it, but pin
+      # explicitly so a runner image change does not silently move the SDK
+      # under a project whose whole design is version-sensitive.
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Report toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+          xcodebuild -showsdks | grep -i iphoneos || true
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate project
+        run: xcodegen generate
+
+      # Surfaced as its own step so a FluidAudio resolution failure reads as
+      # "the pinned dependency moved" rather than a compile error 20 lines
+      # into a build log. It is pre-1.0 and pinned to an exact version.
+      - name: Resolve Swift packages
+        run: |
+          xcodebuild -resolvePackageDependencies \
+            -project Gabbro.xcodeproj \
+            -scheme Gabbro
+          echo "--- resolved ---"
+          cat Gabbro.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved || true
+
+      # Unsigned. Signing happens on Windows, at sideload time, with your free
+      # Apple ID — the CI runner has no certificate and does not need one.
+      # CODE_SIGNING_ALLOWED=NO must also apply to the widget extension, which
+      # is why it is set at the xcodebuild level rather than per target.
+      - name: Build (Release, iphoneos, unsigned)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project Gabbro.xcodeproj \
+            -scheme Gabbro \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      # An .ipa is a zip with the .app inside a Payload/ directory. That is the
+      # whole format; no export options plist is needed for an unsigned build.
+      - name: Package .ipa
+        run: |
+          APP_PATH="build/Build/Products/Release-iphoneos/Gabbro.app"
+          if [ ! -d "$APP_PATH" ]; then
+            echo "::error::$APP_PATH not found. Products:"
+            ls -la build/Build/Products/Release-iphoneos/ || true
+            exit 1
+          fi
+          mkdir -p Payload
+          cp -R "$APP_PATH" Payload/
+          zip -qry Gabbro.ipa Payload
+          echo "--- ipa ---"
+          ls -lh Gabbro.ipa
+          echo "--- embedded binaries ---"
+          ls -la Payload/Gabbro.app/PlugIns/ 2>/dev/null || echo "(no PlugIns — widget extension did not embed)"
+
+      # The widget extension carries the Control Center button and the Live
+      # Activity. A Live Activity is mandatory for the AudioRecordingIntent
+      # path: without it iOS stops the recording. So a missing extension is a
+      # broken build, not a cosmetic gap — fail loudly rather than shipping an
+      # .ipa that cannot record from the Lock Screen.
+      - name: Verify widget extension embedded
+        run: |
+          if [ ! -d "Payload/Gabbro.app/PlugIns/GabbroWidgets.appex" ]; then
+            echo "::error::GabbroWidgets.appex is not embedded. The Live Activity is mandatory for AudioRecordingIntent; iOS stops recordings without one."
+            exit 1
+          fi
+          echo "GabbroWidgets.appex embedded OK"
+
+      - name: Upload .ipa
+        uses: actions/upload-artifact@v4
+        with:
+          name: Gabbro-unsigned-${{ github.sha }}
+          path: Gabbro.ipa
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Sideload instructions
+        run: |
+          echo "### Sideload this build" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "1. Download **Gabbro-unsigned-${{ github.sha }}** from the Artifacts section above." >> $GITHUB_STEP_SUMMARY
+          echo "2. Unzip it to get \`Gabbro.ipa\`." >> $GITHUB_STEP_SUMMARY
+          echo "3. Install from Windows with Sideloadly, AltServer, or iPASide, signing with your free Apple ID." >> $GITHUB_STEP_SUMMARY
+          echo "4. Expires after 7 days. Re-sideload, or let SideStore refresh it on-device." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "M0 measurements come off the phone via **Files -> On My iPhone -> Gabbro -> Diagnostics**. See \`docs/M0-RUNBOOK.md\`." >> $GITHUB_STEP_SUMMARY
