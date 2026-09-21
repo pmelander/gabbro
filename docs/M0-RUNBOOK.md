@@ -112,6 +112,20 @@ per 7 days.** Sideloadly can strip extensions before install for exactly that re
 the app is signed while the extension's App ID was never registered, you get an invalid
 signature and a kernel kill on first use.
 
+**How to confirm it is this and not something in the code.** Compare the two `.ips` files:
+
+| Field | Host app | Broken appex |
+|---|---|---|
+| `codeSigningTrustLevel` | 4 | **0** |
+| `codeSigningAuxiliaryInfo` | non-zero | **0** |
+| `codeSigningFlags` | includes `get-task-allow` | does not |
+
+Trust level 0 means no valid signature at all. `vmRegionInfo` will place the faulting
+address inside an `r--/r--` **mapped file** region — the appex's own code pages — and the
+process will have lived about 3 ms, with `usedImages` empty and symbolication failed. It
+died on the first page-in of its own code, before dynamic linking finished. No app code ran,
+so no app code is implicated.
+
 What to check:
 
 - Whether the sideload tool is set to remove app extensions (Sideloadly offers this).
@@ -119,6 +133,11 @@ What to check:
   every re-sideload can consume more.
 - **Do not run AltStore and Sideloadly against the same app.** They overwrite each other's
   certificates and previously-signed apps stop opening.
+
+**Or just install the no-extension build.** Every CI run publishes
+`Gabbro-no-extension.ipa` alongside the full one — same build, `PlugIns/` stripped, so
+there is no appex to sign or fail. Use it to get on with M0 and sort the extension signing
+as its own task.
 
 What it costs you, and what it does not: the Live Activity and the Control Center button
 stop working, so the **locked-screen start and Lock Screen stop paths cannot be tested.**

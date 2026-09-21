@@ -134,6 +134,29 @@ jobs:
           fi
           echo "GabbroWidgets.appex embedded OK"
 
+      # A second .ipa with PlugIns/ stripped, from the same build. Free.
+      #
+      # CI ships the appex unsigned (CODE_SIGNING_ALLOWED=NO), so the sideload
+      # tool has to re-sign it. When it signs the host app and leaves the
+      # extension bare, the appex gets codeSigningTrustLevel 0 and the kernel
+      # kills it on its first code page-in: CODESIGNING / "Invalid Page",
+      # ~3 ms after launch. Each extension also consumes one of the 10 App IDs
+      # a free Apple ID gets per 7 days, which is why tools drop them.
+      #
+      # M0's four gates do not need the extension -- the in-app record button
+      # does not go through AudioRecordingIntent -- so this variant unblocks
+      # measurement while the appex signing gets sorted separately. What you
+      # lose: the Live Activity, the Control Center button, and therefore the
+      # locked-screen start and Lock Screen stop paths.
+      - name: Package no-extension variant
+        run: |
+          rm -rf NoExt && mkdir -p NoExt
+          cp -R Payload NoExt/Payload
+          rm -rf NoExt/Payload/Gabbro.app/PlugIns
+          (cd NoExt && zip -qry ../Gabbro-no-extension.ipa Payload)
+          ls -lh Gabbro-no-extension.ipa
+          shasum -a 256 Gabbro-no-extension.ipa | tee Gabbro-no-extension.ipa.sha256
+
       # Windows antivirus will often flag this download: a nested archive
       # around an unsigned, zero-reputation executable is textbook heuristic
       # bait, even though an iOS arm64 Mach-O cannot run on Windows at all.
@@ -146,7 +169,8 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Build stamp (appears as \`app_version\`/build in any crash log): \`${BUILD_STAMP}\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "SHA256 of \`Gabbro.ipa\` as built:" >> $GITHUB_STEP_SUMMARY
+          echo "Two variants are published: the full app, and one with the widget extension" >> $GITHUB_STEP_SUMMARY
+          echo "stripped for when the appex will not sign. SHA256 of \`Gabbro.ipa\` as built:" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           shasum -a 256 Gabbro.ipa | tee -a $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
@@ -169,6 +193,8 @@ jobs:
           path: |
             Gabbro.ipa
             Gabbro.ipa.sha256
+            Gabbro-no-extension.ipa
+            Gabbro-no-extension.ipa.sha256
           retention-days: 30
           if-no-files-found: error
 
@@ -187,9 +213,17 @@ jobs:
           files: |
             Gabbro.ipa
             Gabbro.ipa.sha256
+            Gabbro-no-extension.ipa
+            Gabbro-no-extension.ipa.sha256
           generate_release_notes: true
           body: |
             Unsigned build for personal sideloading. Sign it yourself with a free Apple ID.
+
+            **Two variants.** `Gabbro.ipa` is the full app. `Gabbro-no-extension.ipa` has the
+            widget extension stripped -- use it if the appex fails to sign and gets killed with
+            CODESIGNING / "Invalid Page". You lose the Live Activity, the Control Center button,
+            and the locked-screen start/stop paths. Everything else, including all four M0
+            gates, works without it.
 
             **Install straight onto the phone** (no desktop involved): open this page in
             Safari on the iPhone, download `Gabbro.ipa`, then open it in SideStore or
