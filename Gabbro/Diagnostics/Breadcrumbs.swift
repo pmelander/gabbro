@@ -60,6 +60,20 @@ public enum Breadcrumbs {
         return (lastLine, text)
     }
 
+    /// Writes the trail of a crashed run somewhere durable, so the whole
+    /// sequence can be read off the phone in Files rather than squinting at a
+    /// single line in the UI. The last marker says where it died; the sequence
+    /// says how it got there.
+    public static func preserve(_ trail: String) {
+        let stamp = DateFormatter()
+        stamp.locale = Locale(identifier: "en_US_POSIX")
+        stamp.dateFormat = "yyyy-MM-dd-HHmmss"
+        let dest = JobStore.shared.diagnosticsDirectory
+            .appendingPathComponent("crash-trail-\(stamp.string(from: Date())).txt")
+        try? trail.write(to: dest, atomically: true, encoding: .utf8)
+        log.notice("Preserved crash trail: \(dest.lastPathComponent, privacy: .public)")
+    }
+
     /// Stage names. Kept as constants so a rename cannot silently break the
     /// "did it finish cleanly" check above.
     public enum Marker {

@@ -80,18 +80,27 @@ public actor TranscriptionCoordinator {
         // One immutable copy of the segment list, and plain value locals for
         // everything that changes. Nothing below touches `input` again until
         // `assemble` builds the result. See the type doc for why.
+        Breadcrumbs.drop("drain:enter")
         let segments = input.segments
+        Breadcrumbs.drop("drain:copied-segments n=\(segments.count)")
         var progress = segments.map(\.transcribedFrames)
+        Breadcrumbs.drop("drain:copied-progress")
         var languages = input.detectedLanguages
+        Breadcrumbs.drop("drain:copied-languages")
         var tokens: [Token] = []
+        Breadcrumbs.drop("drain:locals-ready")
 
         for index in 0..<segments.count {
+            Breadcrumbs.drop("drain:seg\(index):enter")
             let segment = segments[index]
             let url = JobStore.shared.audioDirectory.appendingPathComponent(segment.filename)
+            Breadcrumbs.drop("drain:seg\(index):url frames=\(segment.frameCount)")
             var offset = progress[index]
 
             while offset < segment.frameCount {
+                Breadcrumbs.drop("drain:seg\(index):iter offset=\(offset)")
                 let backlog = Self.backlogSeconds(segments: segments, progress: progress)
+                Breadcrumbs.drop("drain:seg\(index):backlog=\(Int(backlog))")
 
                 if ThermalPolicy.shouldSuspend {
                     log.notice("Thermal suspend at \(backlog, privacy: .public)s backlog")
@@ -112,8 +121,10 @@ public actor TranscriptionCoordinator {
                     )
                 }
 
+                Breadcrumbs.drop("drain:seg\(index):thermal-ok")
                 let remaining = segment.frameCount - offset
                 let count = min(ThermalPolicy.chunkCapFrames, remaining)
+                Breadcrumbs.drop("drain:seg\(index):count=\(count)")
 
                 // A sliver shorter than the model's useful window is not worth
                 // a disk read and an inference call. Consume it and stop.
@@ -130,15 +141,19 @@ public actor TranscriptionCoordinator {
                     // the speed gate, and the telemetry keeps only the chunks
                     // that ran while the device was locked — a foreground
                     // measurement would flatter the design into passing.
+                    Breadcrumbs.drop("drain:seg\(index):read n=\(samples.count)")
                     let started = ContinuousClock.now
                     let result = try await transcriber.transcribe(samples: samples)
+                    Breadcrumbs.drop("drain:seg\(index):transcribed")
                     await M0Telemetry.shared.noteChunk(
                         audioSeconds: Double(count) / Double(WAVWriter.sampleRate),
                         wallSeconds: Self.seconds(ContinuousClock.now - started)
                     )
                     await M0Telemetry.shared.noteBacklog(seconds: backlog)
+                    Breadcrumbs.drop("drain:seg\(index):telemetry-ok")
 
                     tokens = OverlapMerge.merge(tokens, with: result.tokens)
+                    Breadcrumbs.drop("drain:seg\(index):merged tokens=\(tokens.count)")
                     for code in result.languages where !languages.contains(code) {
                         languages.append(code)
                     }
@@ -168,12 +183,15 @@ public actor TranscriptionCoordinator {
                 }
                 offset += advance
                 progress[index] = offset
+                Breadcrumbs.drop("drain:seg\(index):advanced to=\(offset)")
 
                 await ThermalPolicy.yieldIfThrottled()
             }
         }
 
+        Breadcrumbs.drop("drain:loops-done")
         let transcript = renderer.paragraphs(from: tokens)
+        Breadcrumbs.drop("drain:paragraphs chars=\(transcript.count)")
         return Self.assemble(
             input, progress: progress, languages: languages, transcript: transcript,
             state: transcript.isEmpty ? .failed : .ready,

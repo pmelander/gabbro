@@ -54,6 +54,11 @@ public final class CaptureModel: RecordingControlHandling {
             if let trail = Breadcrumbs.readAndClear() {
                 lastCrashStage = trail.last
                 await M0Telemetry.shared.noteEvent("previous run ended at \(trail.last)")
+                // Keep the WHOLE trail, not just the last line. The last line
+                // says where it died; the sequence says how it got there —
+                // which loop iteration, how many tokens, what offset. Readable
+                // in Files under Diagnostics.
+                Breadcrumbs.preserve(trail.full)
             }
             jobs = await JobStore.shared.all()
             _ = try? await UNUserNotificationCenter.current()
@@ -142,8 +147,11 @@ public final class CaptureModel: RecordingControlHandling {
             // async function where locals live in a heap frame and get dynamic
             // exclusivity checks. Landing the result in a separate constant
             // first means the read and the write cannot share a window.
+            Breadcrumbs.drop("stop:before-drain-call")
             let drained = await coordinator.drain(job: job)
+            Breadcrumbs.drop("stop:after-drain-call")
             job = drained
+            Breadcrumbs.drop("stop:after-drain-assign")
         } else {
             // Battery-baseline run: capture and store, transcribe nothing.
             job.state = .captured
