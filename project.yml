@@ -80,6 +80,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.pmelander.gabbro
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         # NOTE: no App Group. Free personal-team provisioning cannot sign one,
         # and the design deliberately avoids needing it (stateless control
         # button + Live Activity for state). Do not add one back without
