@@ -1,28 +1,119 @@
-import AVFoundation
+// @preconcurrency because AVFAudio is not Sendable-annotated: AVAudioPCMBuffer
+// and AVAudioConverter cross the tap callback boundary by design, and the
+// compiler cannot know the audio thread owns them exclusively. The compiler
+// itself suggests this import for exactly this case.
+@preconcurrency import AVFoundation
 import Foundation
 import OSLog
+import QuartzCore
 import UIKit
+
+/// Converts and writes on the audio thread, with no actor hop per buffer.
+///
+/// The first version of this hopped to `@MainActor` inside the tap callback.
+/// At 4096 frames on a 48 kHz input that is roughly twelve scheduling hops a
+/// second on a real-time thread, which is exactly the thing not to do in an
+/// audio callback — and it was also what produced the captured-var and
+/// non-Sendable-buffer warnings. Conversion is synchronous here; the UI is
+/// notified on a throttle instead.
+private final class AudioTapSink: @unchecked Sendable {
+    private let lock = NSLock()
+    private let target: AVAudioFormat
+    private var writer: WAVWriter?
+    private var converter: AVAudioConverter?
+    private var appending = false
+
+    init(target: AVAudioFormat) { self.target = target }
+
+    func begin(writer: WAVWriter, inputFormat: AVAudioFormat) {
+        lock.lock(); defer { lock.unlock() }
+        self.writer = writer
+        self.converter = AVAudioConverter(from: inputFormat, to: target)
+        self.appending = true
+    }
+
+    /// Stop appending, but leave the file open. Used when the engine must keep
+    /// running past Stop so the tail chunk can finish inside a live session.
+    func stopAppending() {
+        lock.lock(); defer { lock.unlock() }
+        appending = false
+    }
+
+    func finalizeSegment() -> Int {
+        lock.lock(); defer { lock.unlock() }
+        appending = false
+        let frames = writer?.frameCount ?? 0
+        try? writer?.finalizeAndClose()
+        writer = nil
+        converter = nil
+        return frames
+    }
+
+    /// Called on the audio thread. Returns the segment's frame count, or nil
+    /// when not appending (which is the normal state during the tail window).
+    func consume(_ buffer: AVAudioPCMBuffer) -> Int? {
+        lock.lock(); defer { lock.unlock() }
+        guard appending, let converter, let writer else { return nil }
+
+        let ratio = target.sampleRate / buffer.format.sampleRate
+        let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 64
+        guard let out = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: capacity) else {
+            return writer.frameCount
+        }
+
+        var error: NSError?
+        var supplied = false
+        converter.convert(to: out, error: &error) { _, status in
+            if supplied { status.pointee = .noDataNow; return nil }
+            supplied = true
+            status.pointee = .haveData
+            return buffer
+        }
+
+        guard error == nil, out.frameLength > 0, let channel = out.floatChannelData?[0] else {
+            return writer.frameCount
+        }
+        try? writer.append(UnsafeBufferPointer(start: channel, count: Int(out.frameLength)))
+        return writer.frameCount
+    }
+}
+
+/// Rate-limits the audio thread's hops to the main actor.
+///
+/// A 4096-frame buffer at 48 kHz fires roughly twelve times a second. The UI
+/// does not need that, and neither does the disk-space check.
+private final class SyncThrottle: @unchecked Sendable {
+    private let lock = NSLock()
+    private let interval: CFTimeInterval
+    private var last: CFTimeInterval = 0
+
+    init(interval: CFTimeInterval) { self.interval = interval }
+
+    func shouldFire() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        let now = CACurrentMediaTime()
+        guard now - last >= interval else { return false }
+        last = now
+        return true
+    }
+}
 
 /// Microphone capture into durable, segmented Int16 WAV on disk.
 ///
-/// The subtle part is `stop()`. See the comment there before changing it.
+/// The subtle part is `stop()`. Read the comment there before changing it.
 @MainActor
 public final class AudioRecorder: ObservableObject {
     private let log = Logger(subsystem: "com.pmelander.gabbro", category: "Recorder")
 
     private let engine = AVAudioEngine()
     private let sessionManager = AudioSessionManager()
-    private var converter: AVAudioConverter?
-    private var writer: WAVWriter?
-
-    /// True while the tap should append to disk. Goes false at Stop, while the
-    /// tap itself keeps running.
-    private var isAppending = false
+    private var sink: AudioTapSink?
 
     @Published public private(set) var job: RecordingJob?
     @Published public private(set) var isRecording = false
 
-    public var onSegmentGrew: ((Int) -> Void)?
+    /// UI/state sync is throttled rather than per-buffer. See `SyncThrottle`.
+    private static let syncInterval: CFTimeInterval = 0.5
 
     public init() {
         sessionManager.onInterruptionBegan = { [weak self] in
@@ -42,32 +133,18 @@ public final class AudioRecorder: ObservableObject {
         guard AudioSessionManager.hasMicrophonePermission() else {
             throw RecorderError.microphonePermissionDenied
         }
-        guard await JobStore.shared.hasRoomToStart() else {
+        // nonisolated on the actor — no await, it is a plain synchronous read.
+        guard JobStore.shared.hasRoomToStart() else {
             throw RecorderError.insufficientStorage
         }
 
         try sessionManager.activate()
 
         var newJob = RecordingJob(inputRoute: sessionManager.currentRoute())
+        newJob.state = .recording
         self.job = newJob
         try await JobStore.shared.upsert(newJob)
 
-        try openNewSegment()
-        try installTapAndStart()
-
-        isRecording = true
-        isAppending = true
-        newJob.state = .recording
-        self.job = newJob
-        log.notice("Recording started, job \(newJob.id, privacy: .public)")
-    }
-
-    private func installTapAndStart() throws {
-        let input = engine.inputNode
-        let inputFormat = input.outputFormat(forBus: 0)
-
-        // The input node is typically 48 kHz. Parakeet wants 16 kHz mono
-        // Float32; Int16 conversion happens at the disk boundary in WAVWriter.
         guard let target = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
             sampleRate: Double(WAVWriter.sampleRate),
@@ -75,56 +152,43 @@ public final class AudioRecorder: ObservableObject {
             interleaved: false
         ) else { throw RecorderError.formatUnavailable }
 
-        converter = AVAudioConverter(from: inputFormat, to: target)
+        sink = AudioTapSink(target: target)
+        try openNewSegment()
+        try installTapAndStart()
 
-        input.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, _ in
-            self?.handle(buffer: buffer, target: target)
-        }
-        engine.prepare()
-        try engine.start()
+        isRecording = true
+        log.notice("Recording started, job \(newJob.id, privacy: .public)")
     }
 
-    private nonisolated func handle(buffer: AVAudioPCMBuffer, target: AVAudioFormat) {
-        Task { @MainActor [weak self] in
-            guard let self, self.isAppending, let converter = self.converter,
-                  let writer = self.writer else { return }
+    private func installTapAndStart() throws {
+        let input = engine.inputNode
+        let inputFormat = input.outputFormat(forBus: 0)
+        guard let sink else { throw RecorderError.formatUnavailable }
+        let throttle = SyncThrottle(interval: Self.syncInterval)
 
-            let ratio = target.sampleRate / buffer.format.sampleRate
-            let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 64
-            guard let out = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: capacity) else { return }
-
-            var error: NSError?
-            var supplied = false
-            converter.convert(to: out, error: &error) { _, status in
-                if supplied { status.pointee = .noDataNow; return nil }
-                supplied = true
-                status.pointee = .haveData
-                return buffer
-            }
-            guard error == nil, out.frameLength > 0,
-                  let channel = out.floatChannelData?[0] else { return }
-
-            do {
-                try writer.append(UnsafeBufferPointer(start: channel, count: Int(out.frameLength)))
-                self.syncSegmentLength()
-                if await JobStore.shared.mustAbortForSpace() {
-                    self.log.error("Disk nearly full, aborting capture")
-                    await self.stop(reason: .outOfSpace)
-                }
-            } catch {
-                self.log.error("Write failed: \(error.localizedDescription, privacy: .public)")
-            }
+        // Capture `sink` and `throttle` directly. Do NOT reach back through
+        // `self` for main-actor state here: this closure runs on the audio
+        // thread, so `MainActor.assumeIsolated` would trap at runtime rather
+        // than politely fail.
+        input.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, _ in
+            guard let frames = sink.consume(buffer) else { return }
+            guard throttle.shouldFire() else { return }
+            Task { @MainActor in self?.syncSegmentLength(frames: frames) }
         }
+
+        engine.prepare()
+        try engine.start()
     }
 
     // MARK: - Segments
 
     private func openNewSegment() throws {
-        guard var current = job else { return }
+        guard var current = job, let sink else { return }
         let index = current.segments.count
         let name = "\(current.id.uuidString)-\(index).wav"
         let url = JobStore.shared.audioDirectory.appendingPathComponent(name)
-        writer = try WAVWriter(creatingAt: url)
+        let writer = try WAVWriter(creatingAt: url)
+        sink.begin(writer: writer, inputFormat: engine.inputNode.outputFormat(forBus: 0))
         current.segments.append(
             .init(index: index, filename: name, frameCount: 0, transcribedFrames: 0)
         )
@@ -132,17 +196,21 @@ public final class AudioRecorder: ObservableObject {
     }
 
     private func finalizeCurrentSegment() {
-        isAppending = false
-        try? writer?.finalizeAndClose()
-        syncSegmentLength()
-        writer = nil
+        guard let sink else { return }
+        let frames = sink.finalizeSegment()
+        syncSegmentLength(frames: frames)
     }
 
-    private func syncSegmentLength() {
-        guard var current = job, let writer, !current.segments.isEmpty else { return }
-        current.segments[current.segments.count - 1].frameCount = writer.frameCount
+    private func syncSegmentLength(frames: Int) {
+        guard var current = job, !current.segments.isEmpty else { return }
+        current.segments[current.segments.count - 1].frameCount = frames
         job = current
-        onSegmentGrew?(writer.frameCount)
+
+        // Disk check on the throttled path, not per buffer.
+        if JobStore.shared.mustAbortForSpace() {
+            log.error("Disk nearly full, aborting capture")
+            Task { await self.stop(reason: .outOfSpace) }
+        }
     }
 
     // MARK: - Stop
@@ -162,29 +230,26 @@ public final class AudioRecorder: ObservableObject {
     /// to keep the app from being suspended".
     ///
     /// Stop arrives from the Lock Screen with the app already backgrounded, so
-    /// there is no foreground transition standing between it and suspension —
-    /// it can be suspended on the next runloop turn, mid-inference.
+    /// no foreground transition stands between it and suspension — it can be
+    /// suspended on the next runloop turn, mid-inference.
     ///
     /// Two mechanisms, both required:
     ///   1. Keep the tap running (discarding buffers) until the job is `.ready`.
     ///   2. Take `beginBackgroundTask` FIRST, before tearing anything down.
     ///
     /// Booked consequence: the orange mic indicator and the recording Live
-    /// Activity stay lit for several seconds after the user presses Stop. That
-    /// is expected, needs a line of UI explanation, and will otherwise read as
-    /// a bug during criterion 2 and 6 testing.
+    /// Activity stay lit for several seconds after Stop. Expected, needs a
+    /// line of UI explanation, and will otherwise read as a bug during
+    /// criterion 2 and 6 testing.
     public func stop(reason: StopReason = .user) async {
         guard isRecording else { return }
 
         var bgTask = UIBackgroundTaskIdentifier.invalid
         bgTask = UIApplication.shared.beginBackgroundTask(withName: "gabbro.tail") { [weak self] in
-            // Expiry: persist as `captured` so the next launch finishes it.
-            // Never let the system kill us mid-write.
             Task { @MainActor in await self?.markCapturedOnExpiry() }
             if bgTask != .invalid { UIApplication.shared.endBackgroundTask(bgTask) }
         }
 
-        isAppending = false
         finalizeCurrentSegment()
 
         if var current = job {
@@ -197,11 +262,7 @@ public final class AudioRecorder: ObservableObject {
         isRecording = false
         log.notice("Stopped (\(String(describing: reason), privacy: .public)); tap still running for tail")
 
-        // The caller (TranscriptionCoordinator) drains the tail, renders, and
-        // then calls `releaseEngine()`. Only at that point does the session go.
-        if bgTask != .invalid {
-            UIApplication.shared.endBackgroundTask(bgTask)
-        }
+        if bgTask != .invalid { UIApplication.shared.endBackgroundTask(bgTask) }
     }
 
     private func markCapturedOnExpiry() async {
@@ -213,11 +274,12 @@ public final class AudioRecorder: ObservableObject {
     }
 
     /// Tears down the engine and the audio session. Call ONLY once the job has
-    /// reached `.ready` — not at Stop.
+    /// reached `.ready` — never at Stop.
     public func releaseEngine() {
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
         sessionManager.deactivate()
+        sink = nil
         log.notice("Engine stopped and session deactivated")
     }
 }

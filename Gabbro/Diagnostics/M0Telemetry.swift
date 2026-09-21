@@ -60,7 +60,7 @@ public actor M0Telemetry {
             jobID: jobID,
             inferenceEnabled: inferenceEnabled,
             startedAt: Date(),
-            deviceModel: await Self.deviceModel(),
+            deviceModel: Self.deviceModel(),
             systemVersion: await MainActor.run { UIDevice.current.systemVersion },
             batteryStart: await MainActor.run { Double(UIDevice.current.batteryLevel) }
         )
@@ -176,20 +176,23 @@ public actor M0Telemetry {
         os_proc_available_memory()
     }
 
-    private static func deviceModel() async -> String {
+    /// e.g. "iPhone17,1". Which A18 this is matters for reading the gates
+    /// back later — a report with no device identity is not comparable.
+    private static func deviceModel() -> String {
         var info = utsname()
         uname(&info)
-        let raw = withUnsafePointer(to: &info.machine) {
-            $0.withMemoryRebound(to: CChar.self, capacity: 1) { String(validatingUTF8: $0) }
+        let raw = withUnsafeBytes(of: &info.machine) { bytes -> String? in
+            guard let base = bytes.baseAddress else { return nil }
+            return String(cString: base.assumingMemoryBound(to: CChar.self))
         }
-        return raw ?? "unknown"
+        return (raw?.isEmpty == false ? raw : nil) ?? "unknown"
     }
 
     // MARK: - Report
 
     private func write(_ run: Run) throws -> URL {
         let dir = JobStore.shared.diagnosticsDirectory
-        try FileManager.default.createDirectory(withIntermediateDirectories: true, at: dir)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
         let stamp = DateFormatter()
         stamp.locale = Locale(identifier: "en_US_POSIX")

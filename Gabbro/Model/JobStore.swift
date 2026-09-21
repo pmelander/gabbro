@@ -36,19 +36,19 @@ public actor JobStore {
     }
 
     public nonisolated var audioDirectory: URL {
-        fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Audio", isDirectory: true)
     }
 
     public nonisolated var notesDirectory: URL {
-        fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Notes", isDirectory: true)
     }
 
     /// M0 reports. Visible in Files, which is how measurements get off the
     /// phone when there is no Mac and therefore no Instruments.
     public nonisolated var diagnosticsDirectory: URL {
-        fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Diagnostics", isDirectory: true)
     }
 
@@ -61,7 +61,7 @@ public actor JobStore {
     public func prepare() throws {
         for dir in [audioDirectory, notesDirectory, diagnosticsDirectory] {
             if !fm.fileExists(atPath: dir.path) {
-                try fm.createDirectory(withIntermediateDirectories: true, at: dir)
+                try fm.createDirectory(at: dir, withIntermediateDirectories: true)
             }
             try excludeFromBackup(dir)
             try setProtection(dir)
