@@ -1,6 +1,7 @@
 import ActivityKit
 import Foundation
 import Observation
+import UIKit
 import UserNotifications
 
 /// Ties recorder, coordinator and Live Activity together. One instance, owned
@@ -95,6 +96,19 @@ public final class CaptureModel: RecordingControlHandling {
     }
 
     public func stop() async {
+        // Held across the ENTIRE tail: transcription, render, and engine
+        // teardown. This is the mechanism premise 7 rests on — an active
+        // audio session alone does not hold background execution, only a
+        // running I/O unit does, and Stop can arrive from the Lock Screen
+        // with the app already backgrounded.
+        var bgTask = UIBackgroundTaskIdentifier.invalid
+        bgTask = UIApplication.shared.beginBackgroundTask(withName: "gabbro.tail") { [weak self] in
+            Task { @MainActor in await self?.recorder.markCapturedOnExpiry() }
+        }
+        defer {
+            if bgTask != .invalid { UIApplication.shared.endBackgroundTask(bgTask) }
+        }
+
         await recorder.stop()
         guard var job = recorder.job else { return }
 
@@ -145,7 +159,7 @@ public final class CaptureModel: RecordingControlHandling {
 
     // MARK: - Sharing
 
-    /// The file URL handed to `ShareLink`. A file URL, never `Data` or
+    /// The file URL handed to `ShareSheet`. A file URL, never `Data` or
     /// `String` — those lose the filename and can route Obsidian's share
     /// extension down a different branch.
     public func noteURL(for job: RecordingJob) -> URL? {

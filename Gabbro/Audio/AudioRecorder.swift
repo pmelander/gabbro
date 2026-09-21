@@ -4,6 +4,7 @@
 // itself suggests this import for exactly this case.
 @preconcurrency import AVFoundation
 import Foundation
+import Observation
 import OSLog
 import QuartzCore
 import UIKit
@@ -101,16 +102,25 @@ private final class SyncThrottle: @unchecked Sendable {
 /// Microphone capture into durable, segmented Int16 WAV on disk.
 ///
 /// The subtle part is `stop()`. Read the comment there before changing it.
+///
+/// `@Observable`, not `ObservableObject`, and that is load-bearing:
+/// `CaptureModel` is `@Observable` and holds this. SwiftUI's Observation
+/// tracking does not bridge into a nested `ObservableObject` -- reading
+/// `model.recorder.isRecording` in a view would track `recorder` and then
+/// read `isRecording` off something the view is not subscribed to. The state
+/// flipped and nothing redrew: tapping record started a recording with no
+/// visible change whatsoever.
 @MainActor
-public final class AudioRecorder: ObservableObject {
+@Observable
+public final class AudioRecorder {
     private let log = Logger(subsystem: "com.pmelander.gabbro", category: "Recorder")
 
     private let engine = AVAudioEngine()
     private let sessionManager = AudioSessionManager()
     private var sink: AudioTapSink?
 
-    @Published public private(set) var job: RecordingJob?
-    @Published public private(set) var isRecording = false
+    public private(set) var job: RecordingJob?
+    public private(set) var isRecording = false
 
     /// UI/state sync is throttled rather than per-buffer. See `SyncThrottle`.
     private static let syncInterval: CFTimeInterval = 0.5
@@ -246,14 +256,14 @@ public final class AudioRecorder: ObservableObject {
     /// Activity stay lit for several seconds after Stop. Expected, needs a
     /// line of UI explanation, and will otherwise read as a bug during
     /// criterion 2 and 6 testing.
+    /// The background task is NOT taken here. It is taken by
+    /// `CaptureModel.stop()` and held across the whole tail — transcription,
+    /// render, engine teardown — because that is the work that needs
+    /// protecting. Taking it here and releasing it at the end of this method
+    /// (the first version) wrapped only the segment finalize and expired
+    /// before the inference it existed to cover.
     public func stop(reason: StopReason = .user) async {
         guard isRecording else { return }
-
-        var bgTask = UIBackgroundTaskIdentifier.invalid
-        bgTask = UIApplication.shared.beginBackgroundTask(withName: "gabbro.tail") { [weak self] in
-            Task { @MainActor in await self?.markCapturedOnExpiry() }
-            if bgTask != .invalid { UIApplication.shared.endBackgroundTask(bgTask) }
-        }
 
         finalizeCurrentSegment()
 
@@ -266,11 +276,12 @@ public final class AudioRecorder: ObservableObject {
 
         isRecording = false
         log.notice("Stopped (\(String(describing: reason), privacy: .public)); tap still running for tail")
-
-        if bgTask != .invalid { UIApplication.shared.endBackgroundTask(bgTask) }
     }
 
-    private func markCapturedOnExpiry() async {
+    /// Called from the background-task expiration handler in `CaptureModel`.
+    /// Persists as `captured` so the next launch finishes the transcript
+    /// rather than losing it.
+    public func markCapturedOnExpiry() async {
         guard var current = job else { return }
         current.state = .captured
         current.promiseWithdrawnReason = "Backgrounded before the transcript finished"

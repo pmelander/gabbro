@@ -5,6 +5,11 @@ import SwiftUI
 struct CaptureView: View {
     @Environment(CaptureModel.self) private var model
 
+    /// Non-nil while the share sheet is up. Presenting by item rather than by
+    /// bool keeps the job identity attached, so the completion handler marks
+    /// the right note shared.
+    @State private var sharingJob: RecordingJob?
+
     var body: some View {
         NavigationStack {
             VStack(spacing: 24) {
@@ -29,6 +34,18 @@ struct CaptureView: View {
                 actions: { Button("OK") {} },
                 message: { Text(model.lastError ?? "") }
             )
+            .sheet(item: $sharingJob) { job in
+                if let url = model.noteURL(for: job) {
+                    // Marked shared only when the user actually completed a
+                    // share. Dismissing the sheet leaves the note unshared,
+                    // which is the point: `markShared` drives the duplicate
+                    // warning.
+                    ShareSheet(url: url) { completed in
+                        if completed { Task { await model.markShared(job) } }
+                        sharingJob = nil
+                    }
+                }
+            }
         }
     }
 
@@ -69,21 +86,22 @@ struct CaptureView: View {
                     .foregroundStyle(.orange)
             }
 
-            if job.state == .ready || job.state == .shared, let url = model.noteURL(for: job) {
-                // A FILE URL, not Data or String. Handing over a string loses
-                // the filename and can send Obsidian's share extension down a
-                // different branch. Confirmed 2026-09-21: a shared .md becomes
-                // a note, not an attachment.
-                ShareLink(item: url) {
+            if job.state == .ready || job.state == .shared, model.noteURL(for: job) != nil {
+                // A plain Button presenting ShareSheet, NOT a ShareLink.
+                // ShareLink cannot report completion, and attaching a
+                // simultaneousGesture to find out made the first tap mark the
+                // note shared without ever opening the share sheet.
+                Button {
+                    sharingJob = job
+                } label: {
                     Label(
                         model.wouldDuplicate(job) ? "Share again (creates a duplicate)" : "Share to Obsidian",
                         systemImage: "square.and.arrow.up"
                     )
                     .font(.subheadline)
                 }
-                .simultaneousGesture(TapGesture().onEnded {
-                    Task { await model.markShared(job) }
-                })
+                .buttonStyle(.plain)
+                .foregroundStyle(.tint)
             }
         }
         .padding(.vertical, 4)

@@ -71,6 +71,11 @@ public enum Chunking {
     /// has to produce them.
     public static let paragraphSilenceSeconds: Double = 1.5
 
+    /// Below this there is nothing worth running the model on. Guards against
+    /// grinding through slivers at the end of a segment.
+    public static let minChunkSeconds: Double = 0.25
+
     public static var capFrames: Int { Int(capSeconds * Double(WAVWriter.sampleRate)) }
     public static var overlapFrames: Int { Int(overlapSeconds * Double(WAVWriter.sampleRate)) }
+    public static var minChunkFrames: Int { Int(minChunkSeconds * Double(WAVWriter.sampleRate)) }
 }

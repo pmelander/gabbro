@@ -79,8 +79,15 @@ public actor TranscriptionCoordinator {
                 }
 
                 let cap = thermal.chunkCapFrames
-                let count = min(cap, segment.frameCount - offset)
-                guard count > 0 else { break }
+                let remaining = segment.frameCount - offset
+                let count = min(cap, remaining)
+
+                // A sliver shorter than the model's useful window is not worth
+                // a disk read and an inference call. Consume it and stop.
+                guard count >= Chunking.minChunkFrames else {
+                    job.segments[index].transcribedFrames = segment.frameCount
+                    break
+                }
 
                 do {
                     let samples = try WAVWriter.readFloat32(
@@ -115,8 +122,25 @@ public actor TranscriptionCoordinator {
 
                 // Advance by the chunk minus its overlap, so the next window
                 // re-reads the tail the merge aligns on.
-                offset += max(1, count - Chunking.overlapFrames)
-                job.segments[index].transcribedFrames = min(offset, segment.frameCount)
+                //
+                // Two ways this loop must end, and the original `max(1, ...)`
+                // honoured neither. It turned "no forward progress" into
+                // "advance one sample", so a recording shorter than about
+                // 2x the overlap ground through tens of thousands of
+                // iterations -- each a disk read, an inference call, and a
+                // merge against an ever-growing token array -- until iOS
+                // killed the app. Short recordings were the worst case, which
+                // is precisely what a test tap produces.
+                let advance = count - Chunking.overlapFrames
+                if count == remaining || advance <= 0 {
+                    // Either we just consumed the tail of the segment, or the
+                    // remaining audio is shorter than the overlap so there is
+                    // no next window to open. Done either way.
+                    job.segments[index].transcribedFrames = segment.frameCount
+                    break
+                }
+                offset += advance
+                job.segments[index].transcribedFrames = offset
 
                 await thermal.yieldIfThrottled()
             }

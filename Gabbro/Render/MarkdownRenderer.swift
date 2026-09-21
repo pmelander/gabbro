@@ -55,7 +55,7 @@ public struct MarkdownRenderer: Sendable {
         return out.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// Writes the note next to the audio, ready for `ShareLink` to hand over
+    /// Writes the note next to the audio, ready for `ShareSheet` to hand over
     /// as a **file URL**. Handing over `Data` or a `String` loses the filename
     /// and can route the share extension down a different branch.
     public func write(job: RecordingJob, modelRevision: String, to directory: URL) throws -> URL {
