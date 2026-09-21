@@ -29,6 +29,13 @@ public final class WAVWriter {
     public let url: URL
     private(set) public var frameCount: Int = 0
 
+    /// Once closed, every further seek/write/close on a `FileHandle` raises an
+    /// **ObjC exception** (`NSFileHandleOperationException`), and `try?` does
+    /// NOT catch those — it is an immediate, un-debuggable process exit with
+    /// no Swift error anywhere. So closure is tracked explicitly and every
+    /// entry point is guarded. Cheap; the failure mode it prevents is not.
+    private var isClosed = false
+
     /// Creates the file and writes a header with placeholder sizes.
     public init(creatingAt url: URL) throws {
         self.url = url
@@ -48,6 +55,7 @@ public final class WAVWriter {
 
     /// Appends Float32 samples in [-1, 1], converting to Int16.
     public func append(_ samples: UnsafeBufferPointer<Float>) throws {
+        guard !isClosed else { return }
         var bytes = Data(capacity: samples.count * 2)
         for sample in samples {
             // clamp before scaling: an out-of-range sample would wrap and
@@ -61,7 +69,12 @@ public final class WAVWriter {
     }
 
     /// Rewrites the two length fields and closes. Call on the clean path.
+    ///
+    /// Idempotent: several paths can reach it (user stop, an interruption,
+    /// teardown), and a second call used to be an uncatchable crash.
     public func finalizeAndClose() throws {
+        guard !isClosed else { return }
+        isClosed = true
         let dataBytes = frameCount * 2
         try handle.seek(toOffset: UInt64(Self.riffSizeOffset))
         try handle.write(contentsOf: Self.uint32(UInt32(36 + dataBytes)))

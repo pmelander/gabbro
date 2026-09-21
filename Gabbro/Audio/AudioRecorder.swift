@@ -125,15 +125,33 @@ public final class AudioRecorder {
     /// UI/state sync is throttled rather than per-buffer. See `SyncThrottle`.
     private static let syncInterval: CFTimeInterval = 0.5
 
+    /// True from the start of `releaseEngine()` onward.
+    ///
+    /// `AVAudioSession.setActive(false)` can itself post an interruption
+    /// notification, which re-enters `finalizeCurrentSegment()` — and because
+    /// the writer is already gone by then, it reported a frame count of zero
+    /// and overwrote the real length of the segment just recorded. Silent data
+    /// loss, not a crash, which is worse.
+    private var isTearingDown = false
+
     public init() {
         sessionManager.onInterruptionBegan = { [weak self] in
-            Task { @MainActor in self?.finalizeCurrentSegment() }
+            Task { @MainActor in
+                guard let self, !self.isTearingDown else { return }
+                self.finalizeCurrentSegment()
+            }
         }
         sessionManager.onInterruptionEndedShouldResume = { [weak self] in
-            Task { @MainActor in try? self?.openNewSegment() }
+            Task { @MainActor in
+                guard let self, !self.isTearingDown, self.isRecording else { return }
+                try? self.openNewSegment()
+            }
         }
         sessionManager.onRouteChanged = { [weak self] route in
-            Task { @MainActor in self?.job?.inputRoute = route }
+            Task { @MainActor in
+                guard let self, !self.isTearingDown else { return }
+                self.job?.inputRoute = route
+            }
         }
     }
 
@@ -153,6 +171,7 @@ public final class AudioRecorder {
             throw RecorderError.insufficientStorage
         }
 
+        isTearingDown = false
         try sessionManager.activate()
 
         var newJob = RecordingJob(inputRoute: sessionManager.currentRoute())
@@ -292,6 +311,7 @@ public final class AudioRecorder {
     /// Tears down the engine and the audio session. Call ONLY once the job has
     /// reached `.ready` — never at Stop.
     public func releaseEngine() {
+        isTearingDown = true
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
         sessionManager.deactivate()

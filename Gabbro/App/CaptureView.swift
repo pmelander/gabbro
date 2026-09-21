@@ -21,6 +21,14 @@ struct CaptureView: View {
                         .foregroundStyle(.secondary)
                 }
 
+                // No debugger in this loop, so a crash has to announce itself.
+                if let stage = model.lastCrashStage {
+                    Label("Previous run ended at: \(stage)", systemImage: "ant.fill")
+                        .font(.caption)
+                        .foregroundStyle(.pink)
+                        .padding(.horizontal)
+                }
+
                 List(model.jobs) { job in
                     row(for: job)
                 }

@@ -39,10 +39,22 @@ public final class CaptureModel: RecordingControlHandling {
         AudioSessionManager.hasMicrophonePermission()
     }
 
+    /// Set when the previous run died mid-sequence. Shown in the UI so a
+    /// crash cannot pass unnoticed with no debugger attached.
+    public private(set) var lastCrashStage: String?
+
     public func bootstrap() async {
         RecordingControl_Registry.handler = self
         do {
             try await JobStore.shared.prepare()
+
+            // Read the trail before anything else can overwrite it. A trail
+            // that does not end in a completion marker means the previous run
+            // died at that stage.
+            if let trail = Breadcrumbs.readAndClear() {
+                lastCrashStage = trail.last
+                await M0Telemetry.shared.noteEvent("previous run ended at \(trail.last)")
+            }
             jobs = await JobStore.shared.all()
             _ = try? await UNUserNotificationCenter.current()
                 .requestAuthorization(options: [.alert, .sound])
@@ -83,6 +95,7 @@ public final class CaptureModel: RecordingControlHandling {
             break
         }
 
+        Breadcrumbs.drop(Breadcrumbs.Marker.startBegin)
         do {
             try await coordinator.prepare()
             try await recorder.start()
@@ -90,8 +103,10 @@ public final class CaptureModel: RecordingControlHandling {
                 await M0Telemetry.shared.begin(jobID: job.id, inferenceEnabled: inferenceEnabled)
                 await startActivity(for: job)
             }
+            Breadcrumbs.drop(Breadcrumbs.Marker.startDone)
         } catch {
             lastError = error.localizedDescription
+            Breadcrumbs.drop(Breadcrumbs.Marker.startDone)
         }
     }
 
@@ -101,18 +116,26 @@ public final class CaptureModel: RecordingControlHandling {
         // audio session alone does not hold background execution, only a
         // running I/O unit does, and Stop can arrive from the Lock Screen
         // with the app already backgrounded.
-        var bgTask = UIBackgroundTaskIdentifier.invalid
-        bgTask = UIApplication.shared.beginBackgroundTask(withName: "gabbro.tail") { [weak self] in
+        Breadcrumbs.drop(Breadcrumbs.Marker.stopBegin)
+
+        // The expiration handler MUST end the task synchronously before it
+        // returns. Apple is explicit: fail to, and the system terminates the
+        // app. The first version only kicked off an async Task and returned,
+        // which is that termination path exactly.
+        let taskBox = BackgroundTaskBox()
+        taskBox.id = UIApplication.shared.beginBackgroundTask(withName: "gabbro.tail") { [weak self] in
+            Breadcrumbs.drop("stop:bgtask-expired")
             Task { @MainActor in await self?.recorder.markCapturedOnExpiry() }
+            taskBox.end()          // synchronous, before returning
         }
-        defer {
-            if bgTask != .invalid { UIApplication.shared.endBackgroundTask(bgTask) }
-        }
+        defer { taskBox.end() }    // idempotent
 
         await recorder.stop()
+        Breadcrumbs.drop(Breadcrumbs.Marker.stopRecorderStopped)
         guard var job = recorder.job else { return }
 
         await updateActivity(phase: .finishing, job: job)
+        Breadcrumbs.drop(Breadcrumbs.Marker.stopDrainBegin)
         if inferenceEnabled {
             job = await coordinator.drain(job: job)
         } else {
@@ -120,6 +143,7 @@ public final class CaptureModel: RecordingControlHandling {
             job.state = .captured
             job.promiseWithdrawnReason = "Battery baseline run — inference disabled"
         }
+        Breadcrumbs.drop(Breadcrumbs.Marker.stopDrainDone)
         try? await JobStore.shared.upsert(job)
 
         if job.state == .ready {
@@ -129,17 +153,37 @@ public final class CaptureModel: RecordingControlHandling {
                 to: JobStore.shared.notesDirectory
             )
         }
+        Breadcrumbs.drop(Breadcrumbs.Marker.stopRendered)
 
         // Only now: the tail is done, so the engine and session can go.
         recorder.releaseEngine()
+        Breadcrumbs.drop(Breadcrumbs.Marker.stopEngineReleased)
         // Written after releaseEngine so the report covers the full tail
         // window — the part of the run most likely to be suspended.
         await M0Telemetry.shared.end(outcome: job.state.rawValue)
+        Breadcrumbs.drop(Breadcrumbs.Marker.stopTelemetryWritten)
         await updateActivity(phase: job.state == .ready ? .ready : .failed, job: job)
         await endActivity()
+        Breadcrumbs.drop(Breadcrumbs.Marker.stopActivityEnded)
 
         jobs = await JobStore.shared.all()
         if job.state != .ready { await notifyUnfinished(job) }
+        Breadcrumbs.drop(Breadcrumbs.Marker.stopDone)
+    }
+
+    /// Holds a background task id so the expiration handler can end it
+    /// synchronously without capturing a local `var` it also assigns to.
+    /// `end()` is idempotent, because both the handler and the `defer` call it.
+    private final class BackgroundTaskBox {
+        private let lock = NSLock()
+        var id: UIBackgroundTaskIdentifier = .invalid
+
+        func end() {
+            lock.lock(); defer { lock.unlock() }
+            guard id != .invalid else { return }
+            UIApplication.shared.endBackgroundTask(id)
+            id = .invalid
+        }
     }
 
     private func drainPending() async {
