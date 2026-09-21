@@ -19,6 +19,52 @@ push to main
 
 Builds expire after 7 days. Re-sideload, or let SideStore refresh on-device.
 
+## First install: three gates, in this order
+
+A sideloaded build does not just run. There are three separate permissions, each with a
+failure mode that looks like something else. Do them in order.
+
+**1. Trust the certificate.** Settings -> General -> VPN & Device Management -> under
+*Developer App*, tap your Apple ID -> Trust.
+
+- The *Developer App* section **does not exist until you have tried to launch the app at
+  least once.** If Settings looks empty, tap the Gabbro icon, let it fail, go back.
+- The device **needs internet at the moment you tap Trust** — iOS verifies the certificate
+  with Apple. Offline you get "Unable to Verify App", which reads like a signing failure and
+  is not one. Do this *before* any airplane-mode testing.
+- If the error says *"your device management settings do not allow"* and
+  VPN & Device Management also lists an **MDM enrolment profile**, this is a managed device
+  and the policy forbids developer-signed apps. That is a policy question for whoever owns
+  the profile, not something to work around. This project assumes a personal device.
+
+**2. Enable Developer Mode** (iOS 16+, separate from trust). Settings -> Privacy & Security
+-> Developer Mode -> on -> the phone restarts -> **confirm again after the reboot**, with
+your passcode.
+
+- There are **two confirmations and the second is post-restart.** Toggling only schedules
+  the reboot; the alert you get when the phone comes back is what actually enables it. Miss
+  it and the toggle reads off with no explanation.
+- The menu item only appears once the device has been connected to Xcode or had a
+  developer-signed app installed.
+- One-time, persists across reboots. It does relax some on-device protections — a reasonable
+  trade on a personal phone, but a real one.
+
+**3. Grant microphone access** on first launch. `AudioSessionManager.hasMicrophonePermission()`
+gates the intents, and a locked-screen entry point cannot prompt — so grant it in the
+foreground before testing any Lock Screen start.
+
+### Symptoms that are not what they look like
+
+| What you see | Actual cause |
+|---|---|
+| App installs, icon greyed or "Unable to Verify App" | Certificate not trusted, or no network while trusting |
+| "Untrusted Developer" | Step 1 not done |
+| App refuses to launch after trusting | Developer Mode (step 2) |
+| Developer Mode toggle absent | No developer-signed app installed yet |
+| Toggled Developer Mode, still off | Missed the post-restart confirmation |
+| Worked for a week, then stopped | 7-day free-team certificate expiry — re-sideload |
+| A fourth sideloaded app will not install | Free Apple ID caps you at 3 installed at once |
+
 ## The four gates
 
 From the design doc. Change them here and you have changed M0.
