@@ -42,12 +42,22 @@ public actor WhisperTranscriber: Transcriber {
     /// recording's timeline, which is what `Token` promises.
     private var elapsed: TimeInterval = 0
 
-    /// Default is the compressed large-v3 variant. M0 decides whether it fits:
-    /// the memory gate wants ≥ 400 MB headroom while locked and backgrounded,
-    /// and a ~626 MB model plus activations may not leave it. `small` and
-    /// `base` are the fallbacks if it does not — quality drops, Norwegian
-    /// noticeably so.
-    public init(modelName: String = "large-v3-v20240930_626MB") {
+    /// The one knob that matters most on a phone.
+    ///
+    /// Started at the compressed large-v3 (~626 MB) and the app died during
+    /// model preparation with **no crash log at all** — which is the signature
+    /// of a jetsam kill, since those are written as `JetsamEvent-<date>.ips`
+    /// rather than under the app's name. M0's memory gate wants ≥ 400 MB of
+    /// headroom; a 626 MB model plus activations is not a sensible opening bet
+    /// against that.
+    ///
+    /// `small` is the practical floor for multilingual quality. `base` and
+    /// `tiny` are lighter still but noticeably worse on Norwegian, which is
+    /// the language this engine was chosen for in the first place — so going
+    /// below `small` trades away the reason we are here.
+    ///
+    /// Move up to "large-v3-v20240930_626MB" once M0 reports the real headroom.
+    public init(modelName: String = "small") {
         self.modelName = modelName
         self.modelIdentifier = "whisper-\(modelName)"
     }

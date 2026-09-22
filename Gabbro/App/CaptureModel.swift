@@ -112,7 +112,15 @@ public final class CaptureModel: RecordingControlHandling {
     /// Safe to call again after a failure — that is what the Retry button does.
     public func prepareModel() async {
         guard !modelState.isReady else { return }
+
+        // Breadcrumbs with memory readings, because a jetsam kill leaves NO
+        // app crash log -- it writes JetsamEvent-<date>.ips instead, under a
+        // name you will not find by searching for the app. These are written
+        // synchronously, so they survive the kill and the trail says how much
+        // headroom was left when it happened.
+        Breadcrumbs.drop("model:prepare-begin avail=\(Self.availableMB())MB")
         modelState = .downloading(0)
+        var lastDecile = -1
         do {
             try await coordinator.prepare { fraction in
                 Task { @MainActor in
@@ -120,14 +128,36 @@ public final class CaptureModel: RecordingControlHandling {
                     // the model afterwards is its own wait worth naming.
                     self.modelState = fraction >= 1 ? .loading : .downloading(fraction)
                 }
+                // One breadcrumb per 10%, not per callback -- this fires often
+                // and each one is a synchronous file write.
+                let decile = Int(fraction * 10)
+                if decile > lastDecile {
+                    lastDecile = decile
+                    Breadcrumbs.drop("model:download \(decile * 10)% avail=\(Self.availableMB())MB")
+                }
             }
+            Breadcrumbs.drop("model:downloaded avail=\(Self.availableMB())MB")
             modelState = .ready
+            Breadcrumbs.drop("model:ready avail=\(Self.availableMB())MB")
             // Anything recovered at launch (force-quit, jetsam, or an
             // interruption whose .ended never arrived) can finish now.
             await drainPending()
         } catch {
+            Breadcrumbs.drop("model:failed \(error.localizedDescription)")
             modelState = .failed(error.localizedDescription)
         }
+    }
+
+    /// Which model, and how much room is left. Shown in the UI because the
+    /// model choice is the main lever when preparation dies.
+    public var modelDescription: String {
+        "\(modelIdentifier) · \(Self.availableMB()) MB free"
+    }
+
+    /// Headroom before jetsam, in MB. Same measurement the M0 memory gate
+    /// uses, surfaced here because model load is where it is most at risk.
+    nonisolated static func availableMB() -> Int {
+        M0Telemetry.availableMemoryBytes() / (1024 * 1024)
     }
 
     public func start() async {

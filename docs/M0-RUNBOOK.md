@@ -146,6 +146,28 @@ directly rather than through `AudioRecordingIntent`, and `Activity.request` is a
 behind a `try?`. **M0's four gates do not need the extension.** Measure first, sort the
 appex signing before testing the intent paths.
 
+### "It crashed but there is no crash log"
+
+That is the signature of a **memory kill**. Jetsam does not write a crash report under the
+app's name — it writes **`JetsamEvent-<date>.ips`**, so scrolling Analytics Data looking for
+"Gabbro" finds nothing and the crash appears to have left no trace.
+
+Where to look instead:
+
+1. **Analytics Data → `JetsamEvent-*`** around the time it died. The app will be listed
+   inside with its memory footprint at kill time.
+2. **`Files → On My iPhone → Gabbro → Diagnostics → crash-trail.txt`.** Breadcrumbs are
+   written synchronously, so they survive a kill that leaves no crash report. The model
+   preparation path records available memory at each step
+   (`model:prepare-begin`, `model:download 30% avail=…MB`, `model:downloaded`,
+   `model:ready`), so the trail shows both where it died and how much headroom was left.
+
+The main lever is the **model size**, set in `WhisperTranscriber.init`. `small` is the
+practical floor for multilingual quality; `base` and `tiny` are lighter but noticeably worse
+on Norwegian, which is the language the engine was chosen for — so dropping below `small`
+trades away the reason for the engine. Move up to the large variant only once M0 reports the
+real headroom.
+
 ### Which build am I actually running?
 
 `CFBundleVersion` is stamped in CI with the run number and the short commit SHA, and it

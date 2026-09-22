@@ -99,6 +99,8 @@ struct CaptureView: View {
                     .font(.footnote).foregroundStyle(.secondary)
                 Text("One time, a few hundred MB. Wi-Fi recommended.")
                     .font(.caption2).foregroundStyle(.tertiary)
+                Text(model.modelDescription)
+                    .font(.caption2).foregroundStyle(.tertiary)
             }
 
         case .loading:
@@ -118,6 +120,8 @@ struct CaptureView: View {
                     .multilineTextAlignment(.center)
                 Button("Retry") { Task { await model.prepareModel() } }
                     .buttonStyle(.bordered)
+                Text(model.modelDescription)
+                    .font(.caption2).foregroundStyle(.tertiary)
             }
             .padding(.horizontal)
         }
