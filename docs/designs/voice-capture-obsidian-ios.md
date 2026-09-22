@@ -526,7 +526,10 @@ No CI/CD; local Xcode builds.
    peak RSS, sustained throughput, `thermalState` over time, and battery percentage consumed
    versus the same capture with inference disabled.
 3. **Gates — all four:**
-   - **Speed:** sustained **≥ 2× real-time single-stream.** (Without this, a memory-clean,
+   - **Speed:** sustained **≥ 2× real-time single-stream.** *(First measurement: 24.4× on
+     Whisper `small`. The "measured under lock" qualifier is retired — transcription now runs
+     in the foreground from a queue, not during locked capture, so there is no locked
+     inference to measure.)* (Without this, a memory-clean,
      thermally-fine, 0.4× model passes M0 and produces a useless app.)
    - **Memory:** gate on **`os_proc_available_memory()` ≥ 400 MB at peak**, measured
      *locked and backgrounded* (where the jetsam limit is tighter than in the foreground),

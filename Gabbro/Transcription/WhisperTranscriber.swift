@@ -42,22 +42,23 @@ public actor WhisperTranscriber: Transcriber {
     /// recording's timeline, which is what `Token` promises.
     private var elapsed: TimeInterval = 0
 
-    /// The one knob that matters most on a phone.
+    /// The one knob that matters most, now set from measurement rather than caution.
     ///
-    /// Started at the compressed large-v3 (~626 MB) and the app died during
-    /// model preparation with **no crash log at all** — which is the signature
-    /// of a jetsam kill, since those are written as `JetsamEvent-<date>.ips`
-    /// rather than under the app's name. M0's memory gate wants ≥ 400 MB of
-    /// headroom; a 626 MB model plus activations is not a sensible opening bet
-    /// against that.
+    /// Opened on the compressed large-v3 (~626 MB), dropped to `small` after a
+    /// crash during model preparation that looked like a memory kill. It was
+    /// not — the jetsam log turned out to be a week old and unrelated, and the
+    /// first real M0 report showed **3.45 GB available** against a gate that
+    /// wanted 400 MB. There was never a memory problem.
     ///
-    /// `small` is the practical floor for multilingual quality. `base` and
-    /// `tiny` are lighter still but noticeably worse on Norwegian, which is
-    /// the language this engine was chosen for in the first place — so going
-    /// below `small` trades away the reason we are here.
+    /// `small` is noticeably weak on Swedish, which is the daily case here, so
+    /// the headroom is spent on quality. Measured alongside it: RTF 24x on
+    /// `small`, so even a model several times heavier stays far faster than
+    /// real time — and real-time is not a requirement anyway, the queue is.
     ///
-    /// Move up to "large-v3-v20240930_626MB" once M0 reports the real headroom.
-    public init(modelName: String = "small") {
+    /// If Swedish is still poor, the next lever is `DecodingOptions(language:)`
+    /// — forcing a language beats auto-detect on non-English audio, at the cost
+    /// of the multilingual switching this engine was chosen for.
+    public init(modelName: String = "large-v3-v20240930_626MB") {
         self.modelName = modelName
         self.modelIdentifier = "whisper-\(modelName)"
     }
