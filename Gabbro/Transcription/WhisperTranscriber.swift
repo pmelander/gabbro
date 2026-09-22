@@ -78,7 +78,10 @@ public actor WhisperTranscriber: Transcriber {
         var languages: [String] = []
 
         for result in results {
-            if let code = result.language, !code.isEmpty, !languages.contains(code) {
+            // Non-optional String, not String? — Whisper always reports
+            // something. It can still be empty, so that is the real check.
+            let code = result.language
+            if !code.isEmpty, !languages.contains(code) {
                 languages.append(code)
             }
             for segment in result.segments {
