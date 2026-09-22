@@ -223,6 +223,11 @@ public final class CaptureModel: RecordingControlHandling {
             if let job = recorder.job {
                 await M0Telemetry.shared.begin(jobID: job.id, inferenceEnabled: inferenceEnabled)
                 await startActivity(for: job)
+                // Show the row immediately. The recorder has already persisted
+                // the job, so this is just reflecting what is on disk — and it
+                // means the entry transitions in place at Stop instead of
+                // appearing out of nowhere.
+                jobs = await JobStore.shared.all()
             }
             Breadcrumbs.drop(Breadcrumbs.Marker.startDone)
         } catch {
@@ -259,6 +264,18 @@ public final class CaptureModel: RecordingControlHandling {
         Breadcrumbs.drop(Breadcrumbs.Marker.stopRecorderStopped)
         guard var job = recorder.job else { return }
 
+        // Refresh the list HERE, before transcription, not after it.
+        //
+        // This used to happen at the very end of stop(), which meant the row
+        // did not exist until the whole transcript was finished — minutes on a
+        // long recording. It read as the app being slow to show the recording;
+        // in fact there was nothing to show yet, and the "Transcribing — N%"
+        // state had no row to appear on. Marking the job as the one being
+        // worked BEFORE the refresh means it shows progress from the first
+        // frame.
+        transcribingJobID = job.id
+        jobs = await JobStore.shared.all()
+
         await updateActivity(phase: .finishing, job: job)
         Breadcrumbs.drop(Breadcrumbs.Marker.stopDrainBegin)
         if inferenceEnabled {
@@ -268,7 +285,6 @@ public final class CaptureModel: RecordingControlHandling {
             // exclusivity checks. Landing the result in a separate constant
             // first means the read and the write cannot share a window.
             Breadcrumbs.drop("stop:before-drain-call")
-            transcribingJobID = job.id
             let drained = await coordinator.drain(job: job, isLive: false) { fraction in
                 Task { @MainActor in self.transcribeProgress = fraction }
             }
