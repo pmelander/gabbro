@@ -153,7 +153,7 @@ public final class AudioRecorder {
         sessionManager.onInterruptionEndedShouldResume = { [weak self] in
             Task { @MainActor in
                 guard let self, !self.isTearingDown, self.isRecording else { return }
-                try? self.openNewSegment()
+                try? await self.openNewSegment()
             }
         }
         sessionManager.onRouteChanged = { [weak self] route in
@@ -204,7 +204,7 @@ public final class AudioRecorder {
         ) else { throw RecorderError.formatUnavailable }
 
         sink = AudioTapSink(target: target)
-        try openNewSegment()
+        try await openNewSegment()
         try installTapAndStart()
 
         isRecording = true
@@ -247,7 +247,7 @@ public final class AudioRecorder {
 
     // MARK: - Segments
 
-    private func openNewSegment() throws {
+    private func openNewSegment() async throws {
         guard var current = job, let sink else { return }
         let index = current.segments.count
         let name = "\(current.id.uuidString)-\(index).wav"
@@ -258,6 +258,18 @@ public final class AudioRecorder {
             .init(index: index, filename: name, frameCount: 0, transcribedFrames: 0)
         )
         job = current
+
+        // PERSIST NOW. The segment record has to reach disk the moment the
+        // file exists, or a force-quit leaves a job saying `recording` with an
+        // empty segment list and a WAV on disk that nothing points at —
+        // recovery then loops over zero segments and finds nothing. That is
+        // exactly what happened, and it is the rule JobStore's own comment
+        // states: persist before advancing state, never after.
+        //
+        // frameCount stays 0 here on purpose; recovery derives the real length
+        // from the file on disk via WAVWriter.repairHeader, so it does not
+        // need updating on every buffer.
+        try await JobStore.shared.upsert(current)
     }
 
     private func finalizeCurrentSegment() {

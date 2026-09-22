@@ -118,6 +118,37 @@ public actor JobStore {
             // Same hazard as TranscriptionCoordinator.drain: iterating
             // `job.segments.indices` holds a read access open across a body
             // that mutates `job.segments`. Snapshot the count instead.
+            // Re-attach audio the job record does not know about.
+            //
+            // Segments are persisted the moment their file is created, but
+            // builds before that fix wrote the WAV without ever recording the
+            // segment — so a force-quit left audio on disk that nothing
+            // pointed at, and recovery looped over an empty list. Files are
+            // named "<jobID>-<index>.wav", which is enough to reconstruct.
+            // This also rescues recordings stranded by those builds.
+            let known = Set(job.segments.map(\.filename))
+            let prefix = "\(id.uuidString)-"
+            let onDisk = (try? fm.contentsOfDirectory(atPath: audioDirectory.path)) ?? []
+            for name in onDisk.sorted()
+            where name.hasPrefix(prefix) && name.hasSuffix(".wav") && !known.contains(name) {
+                let url = audioDirectory.appendingPathComponent(name)
+                // `try?` flattens here: repairHeader is `throws -> Double?`,
+                // so this binds a Double, not a Double?.
+                guard let seconds = try? WAVWriter.repairHeader(at: url), seconds > 0
+                else { continue }
+                let index = Int(name.dropFirst(prefix.count).dropLast(4)) ?? job.segments.count
+                job.segments.append(.init(
+                    index: index, filename: name,
+                    frameCount: Int(seconds * Double(WAVWriter.sampleRate)),
+                    transcribedFrames: 0
+                ))
+                log.notice("Recovered orphaned segment \(name, privacy: .public)")
+            }
+            job.segments.sort { $0.index < $1.index }
+
+            // Then repair the headers of everything, known or recovered. A
+            // force-quit leaves placeholder sizes in the RIFF header, so the
+            // real length comes from the file on disk.
             let segmentCount = job.segments.count
             for i in 0..<segmentCount {
                 let url = audioDirectory.appendingPathComponent(job.segments[i].filename)
@@ -125,7 +156,10 @@ public actor JobStore {
                     job.segments[i].frameCount = Int(seconds * Double(WAVWriter.sampleRate))
                 }
             }
-            job.state = .captured
+
+            // Anything with no audio at all is a failed start, not a recovery.
+            job.state = job.segments.contains { $0.frameCount > 0 } ? .captured : .failed
+            if job.state == .failed { job.failureReason = "No audio was captured" }
             jobs[id] = job
             recovered += 1
         }
