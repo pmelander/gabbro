@@ -45,6 +45,15 @@ off. The only network activity in the app's life is one model download on first 
     the whole M0 spike. The decision stands; owning the instrument is the project.
   - Fallback if M0 fails: see *M0 failure policy* — it is a stop, not a substitution.
 - Personal tool. One user. No App Store.
+- **Nothing happens invisibly.** If the app is doing work, the user can see it: a
+  determinate bar where a fraction exists, elapsed time where it does not, and a named state
+  on every queued item. This is a constraint, not polish — it was learned three times in one
+  day. A silent model download read as a dead record button and got double-tapped into an
+  `installTapOnBus` abort; a silent post-Stop catch-up read as a hang; and a job that could
+  never finish reported nothing at all. Every one presented as "the app is broken".
+- **Real-time transcription is NOT required.** A queue is fine, provided it is transparent
+  and drains on its own. This retires the incremental-during-capture mechanism and the
+  10-second-at-Stop promise — see premise 7.
 - **Language coverage is a hard criterion**, stated alongside on-device-only:
   **Norwegian, Swedish, Danish and English are non-negotiable**, plus European languages
   generally. **This changed the engine.** Parakeet TDT v3 covers the 24 EU official
@@ -454,10 +463,12 @@ says nothing about output. Confirm in M0.
    paragraph of the Swedish/English fixture **without hearing the audio**. **Use a second
    reader, or run it at least two weeks after recording** — the person who spoke it will
    reconstruct from memory, not from the text.
-6. **At Stop, state reaches `ready` within 10 seconds** for a recording up to 20 minutes.
-   Measured from timestamps written into the job store at Stop and at the `ready` transition
-   — not a stopwatch, since the device is locked. Withdrawn visibly under `.critical` thermal
-   or a backlog breach, per the graded policy.
+6. ~~At Stop, state reaches `ready` within 10 seconds.~~ **RETIRED.** Real-time
+   transcription is not a requirement. Replaced by: **the queue is always legible and always
+   moves.** Every job shows its state (`Queued`, `Transcribing — N%`, `Ready`), and pending
+   work resumes automatically whenever the app is foregrounded. Transcription takes as long
+   as it takes; what is not acceptable is a user unable to tell whether anything is
+   happening.
 7. **A week of real captures** with no reach for another tool.
 
 ## Distribution Plan

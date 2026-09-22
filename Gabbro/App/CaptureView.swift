@@ -4,6 +4,7 @@ import SwiftUI
 /// Queue UI, settings, templates and retention are M2.
 struct CaptureView: View {
     @Environment(CaptureModel.self) private var model
+    @Environment(\.scenePhase) private var scenePhase
 
     /// Non-nil while the share sheet is up. Presenting by item rather than by
     /// bool keeps the job identity attached, so the completion handler marks
@@ -17,20 +18,18 @@ struct CaptureView: View {
 
                 modelStatus
 
-                if let fraction = model.transcribeProgress {
-                    VStack(spacing: 6) {
-                        ProgressView(value: fraction).frame(maxWidth: 260)
-                        Text("Transcribing — \(Int(fraction * 100))%")
-                            .font(.footnote).foregroundStyle(.secondary)
-                        Text("Runs on device. Safe to lock the phone.")
-                            .font(.caption2).foregroundStyle(.tertiary)
+                if model.recorder.isRecording, let job = model.recorder.job {
+                    VStack(spacing: 4) {
+                        // Counts up from when capture began. The one thing you
+                        // want on screen while recording is how long you have
+                        // been talking.
+                        Text(job.createdAt, style: .timer)
+                            .font(.system(size: 34, weight: .medium, design: .rounded))
+                            .monospacedDigit()
+                        Text("Recording — you can lock the phone")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
                     }
-                }
-
-                if model.recorder.isRecording {
-                    Text("Recording — you can lock the phone")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
                 }
 
                 // No debugger in this loop, so a crash has to announce itself.
@@ -54,6 +53,12 @@ struct CaptureView: View {
                 actions: { Button("OK") {} },
                 message: { Text(model.lastError ?? "") }
             )
+            // Transcription cannot finish in a background window, so the
+            // queue moves whenever the app is in front. Without this a
+            // "Queued" row would sit there until the user tapped something.
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .active { Task { await model.resumeQueue() } }
+            }
             .sheet(item: $sharingJob) { job in
                 if let url = model.noteURL(for: job) {
                     // Marked shared only when the user actually completed a
@@ -143,8 +148,23 @@ struct CaptureView: View {
             HStack {
                 Text(job.createdAt, format: .dateTime.month().day().hour().minute())
                     .font(.headline)
+                Text(Self.duration(job.totalDurationSeconds))
+                    .font(.subheadline).foregroundStyle(.secondary)
                 Spacer()
                 statusBadge(for: job)
+            }
+
+            // Queue transparency: every row says what is happening to it.
+            if model.transcribingJobID == job.id {
+                VStack(alignment: .leading, spacing: 4) {
+                    ProgressView(value: model.transcribeProgress ?? 0)
+                    Text("Transcribing — \(Int((model.transcribeProgress ?? 0) * 100))%  ·  on device")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            } else if job.state == .captured {
+                Label("Queued — will transcribe when Gabbro is open",
+                      systemImage: "clock.arrow.circlepath")
+                    .font(.caption).foregroundStyle(.secondary)
             }
 
             if !job.transcript.isEmpty {
@@ -188,6 +208,11 @@ struct CaptureView: View {
             .padding(.vertical, 3)
             .background(color(for: job.state).opacity(0.15), in: Capsule())
             .foregroundStyle(color(for: job.state))
+    }
+
+    private static func duration(_ seconds: Double) -> String {
+        let total = Int(seconds.rounded())
+        return "\(total / 60)m \(String(format: "%02d", total % 60))s"
     }
 
     private func color(for state: RecordingJob.State) -> Color {

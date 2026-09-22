@@ -51,6 +51,10 @@ public final class CaptureModel: RecordingControlHandling {
     /// twice.
     private var lifecycleBusy = false
 
+    /// Which job is being transcribed right now, so the queue can show
+    /// progress against the actual row rather than a detached bar.
+    public private(set) var transcribingJobID: UUID?
+
     /// Non-nil while a transcript is being caught up, 0...1.
     ///
     /// A 25-minute recording can take many minutes to transcribe after Stop.
@@ -256,10 +260,12 @@ public final class CaptureModel: RecordingControlHandling {
             // exclusivity checks. Landing the result in a separate constant
             // first means the read and the write cannot share a window.
             Breadcrumbs.drop("stop:before-drain-call")
+            transcribingJobID = job.id
             let drained = await coordinator.drain(job: job, isLive: false) { fraction in
                 Task { @MainActor in self.transcribeProgress = fraction }
             }
             transcribeProgress = nil
+            transcribingJobID = nil
             Breadcrumbs.drop("stop:after-drain-call")
             job = drained
             Breadcrumbs.drop("stop:after-drain-assign")
@@ -312,12 +318,26 @@ public final class CaptureModel: RecordingControlHandling {
         }
     }
 
+    /// Work the queue whenever the app comes to the foreground.
+    ///
+    /// Real-time transcription is not a requirement — a queue is fine — but
+    /// only if it actually drains without being asked. Transcription can take
+    /// minutes and cannot finish inside a background window, so the foreground
+    /// is where it happens.
+    public func resumeQueue() async {
+        guard modelState.isReady, !lifecycleBusy, transcribingJobID == nil else { return }
+        guard !(await JobStore.shared.pendingWork().isEmpty) else { return }
+        await drainPending()
+    }
+
     private func drainPending() async {
         for pending in await JobStore.shared.pendingWork() {
+            transcribingJobID = pending.id
             let finished = await coordinator.drain(job: pending, isLive: false) { fraction in
                 Task { @MainActor in self.transcribeProgress = fraction }
             }
             transcribeProgress = nil
+            transcribingJobID = nil
             try? await JobStore.shared.upsert(finished)
             if finished.state == .ready {
                 _ = try? renderer.write(
