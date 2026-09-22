@@ -41,6 +41,15 @@ public final class CaptureModel: RecordingControlHandling {
         public var isReady: Bool { self == .ready }
     }
     public private(set) var modelState: ModelState = .idle
+
+    /// Serialises the capture lifecycle against double taps.
+    ///
+    /// Each tap of the record button spawns its own Task, so start() and
+    /// stop() could both run twice concurrently. The visible consequence was
+    /// an abort inside installTapOnBus; the invisible ones would have been
+    /// duplicate background tasks, duplicate telemetry runs and a job written
+    /// twice.
+    private var lifecycleBusy = false
     private var activity: Activity<RecordingActivityAttributes>?
 
     private init() {
@@ -165,6 +174,9 @@ public final class CaptureModel: RecordingControlHandling {
             lastError = "The speech model is not ready yet."
             return
         }
+        guard !lifecycleBusy, !recorder.isRecording else { return }
+        lifecycleBusy = true
+        defer { lifecycleBusy = false }
         // Ask before checking. This is the foreground path, so it is the only
         // place that CAN prompt — the Lock Screen intent cannot, which is why
         // it only ever checks.
@@ -201,6 +213,10 @@ public final class CaptureModel: RecordingControlHandling {
     }
 
     public func stop() async {
+        guard !lifecycleBusy, recorder.isRecording else { return }
+        lifecycleBusy = true
+        defer { lifecycleBusy = false }
+
         // Held across the ENTIRE tail: transcription, render, and engine
         // teardown. This is the mechanism premise 7 rests on — an active
         // audio session alone does not hold background execution, only a

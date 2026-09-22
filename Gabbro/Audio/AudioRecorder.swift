@@ -134,6 +134,15 @@ public final class AudioRecorder {
     /// loss, not a crash, which is worse.
     private var isTearingDown = false
 
+    /// True between entering `start()` and the tap being live.
+    ///
+    /// Without it, two taps on the record button spawn two Tasks, both reach
+    /// `installTapOnBus`, and the second raises an ObjC exception —
+    /// uncatchable from Swift, so the process aborts. That is exactly what
+    /// happened when the button looked dead during the model download and got
+    /// tapped again.
+    private var isStarting = false
+
     public init() {
         sessionManager.onInterruptionBegan = { [weak self] in
             Task { @MainActor in
@@ -158,6 +167,14 @@ public final class AudioRecorder {
     // MARK: - Start
 
     public func start() async throws {
+        // Re-entry guard first. Everything below assumes a single caller.
+        guard !isRecording, !isStarting else {
+            log.notice("start() ignored: already recording or starting")
+            return
+        }
+        isStarting = true
+        defer { isStarting = false }
+
         // Last line of defence. The foreground path in CaptureModel prompts
         // before reaching here; an intent-driven start cannot prompt, so it
         // arrives here and fails with a message that says the right thing.
@@ -197,6 +214,20 @@ public final class AudioRecorder {
     private func installTapAndStart() throws {
         let input = engine.inputNode
         let inputFormat = input.outputFormat(forBus: 0)
+
+        // installTapOnBus raises an ObjC exception rather than throwing, and
+        // Swift cannot catch that — it is an immediate abort. So rule out both
+        // of its causes here, where we can fail cleanly instead.
+        //
+        // 1. A tap already on the bus. Removing when none is installed is a
+        //    no-op, so this is free insurance.
+        input.removeTap(onBus: 0)
+        // 2. A degenerate format, which is what you get when the session is
+        //    not active or the microphone is held by something else.
+        guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0 else {
+            throw RecorderError.inputUnavailable
+        }
+
         guard let sink else { throw RecorderError.formatUnavailable }
         let throttle = SyncThrottle(interval: Self.syncInterval)
 
@@ -329,6 +360,9 @@ public enum RecorderError: LocalizedError {
     case microphonePermissionNotRequested
     case insufficientStorage
     case formatUnavailable
+    /// The input node reported a zero format — session inactive, or the
+    /// microphone is being held by another app.
+    case inputUnavailable
 
     public var errorDescription: String? {
         switch self {
@@ -340,6 +374,8 @@ public enum RecorderError: LocalizedError {
             "Not enough free space to start recording."
         case .formatUnavailable:
             "Could not create the 16 kHz mono capture format."
+        case .inputUnavailable:
+            "The microphone is not available right now. Another app may be using it."
         }
     }
 }
