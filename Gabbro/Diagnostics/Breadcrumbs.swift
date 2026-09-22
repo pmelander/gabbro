@@ -65,13 +65,22 @@ public enum Breadcrumbs {
     /// single line in the UI. The last marker says where it died; the sequence
     /// says how it got there.
     public static func preserve(_ trail: String) {
-        let stamp = DateFormatter()
-        stamp.locale = Locale(identifier: "en_US_POSIX")
-        stamp.dateFormat = "yyyy-MM-dd-HHmmss"
-        let dest = JobStore.shared.diagnosticsDirectory
-            .appendingPathComponent("crash-trail-\(stamp.string(from: Date())).txt")
-        try? trail.write(to: dest, atomically: true, encoding: .utf8)
-        log.notice("Preserved crash trail: \(dest.lastPathComponent, privacy: .public)")
+        // Fixed filenames, no timestamp. Two reasons: these get shared onto a
+        // Windows machine where `:` is illegal in a path and some share flows
+        // inject one, and a stable name is simply easier to find in Files
+        // every time. The timestamps are inside the file anyway, one per line.
+        let dir = JobStore.shared.diagnosticsDirectory
+        let current = dir.appendingPathComponent("crash-trail.txt")
+        let previous = dir.appendingPathComponent("crash-trail-previous.txt")
+
+        // Keep one generation back, so a crash on the launch after a crash
+        // does not destroy the evidence for the first one.
+        if FileManager.default.fileExists(atPath: current.path) {
+            try? FileManager.default.removeItem(at: previous)
+            try? FileManager.default.moveItem(at: current, to: previous)
+        }
+        try? trail.write(to: current, atomically: true, encoding: .utf8)
+        log.notice("Preserved crash trail: \(current.lastPathComponent, privacy: .public)")
     }
 
     /// Stage names. Kept as constants so a rename cannot silently break the

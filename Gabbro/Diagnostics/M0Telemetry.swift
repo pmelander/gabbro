@@ -125,7 +125,17 @@ public actor M0Telemetry {
                 wallSeconds: item.wallSeconds, availableBytes: available
             ))
         }
-        run?.maxBacklogSeconds = max(run?.maxBacklogSeconds ?? 0, maxBacklogSeconds)
+        // Read, then write. NEVER `run?.x = f(run?.x)`.
+        //
+        // That form holds a modify access to `run` for the assignment while
+        // the right-hand side reads `run`, which is an exclusivity violation
+        // with no concurrency involved at all -- purely synchronous, and
+        // deterministic. It aborted every stop for six builds. It survived so
+        // long because at launch `run` is nil, optional chaining
+        // short-circuits, no access is taken, and the launch-time drain
+        // therefore completed perfectly every time.
+        let previousMax = run?.maxBacklogSeconds ?? 0
+        run?.maxBacklogSeconds = max(previousMax, maxBacklogSeconds)
     }
 
     /// Called by `TranscriptionCoordinator` after every chunk. The ratio of
@@ -146,7 +156,9 @@ public actor M0Telemetry {
     }
 
     public func noteBacklog(seconds: Double) {
-        run?.maxBacklogSeconds = max(run?.maxBacklogSeconds ?? 0, seconds)
+        // Same hazard as noteChunks: separate the read from the write.
+        let previousMax = run?.maxBacklogSeconds ?? 0
+        run?.maxBacklogSeconds = max(previousMax, seconds)
     }
 
     public func noteEvent(_ text: String) {
