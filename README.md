@@ -1,139 +1,112 @@
 # Gabbro
 
-On-device voice capture for iPhone. Records, transcribes locally on the Neural Engine, and
-hands a markdown note to Obsidian through the iOS share sheet.
+Talk into your phone. Get a markdown note in your Obsidian vault.
 
-**Design doc: [`docs/designs/voice-capture-obsidian-ios.md`](docs/designs/voice-capture-obsidian-ios.md).**
-Read it before changing anything structural — several obvious-looking simplifications here
-are load-bearing and the doc says why.
+Nothing leaves the device. The recording, the transcription and the note are all
+produced on the phone, on the Neural Engine. The only network request Gabbro
+ever makes is fetching the speech model once, on first launch.
 
-## Status
+---
 
-Pre-M0. The pipeline is scaffolded; the ASR integration is deliberately not written.
+## What it does
 
-## Building — there is no Mac in this loop
+**Record, including with the screen locked.** Press record, pocket the phone,
+keep talking. Audio is written to disk *as it is captured*, so a crash, a
+force-quit or a phone running out of battery costs you nothing — the recording
+is still there when you come back.
 
-Development happens on Windows. CI builds, you sideload, the phone measures itself.
+**Transcribe on device, in your languages.** Whisper running on the Apple Neural
+Engine. Norwegian, Swedish, Danish and English, plus around ninety more. The
+detected language is recorded in the note.
 
-```
-push to main
-  -> GitHub Actions builds an unsigned .ipa on a macOS runner (~10-15 min, free)
-  -> download the artifact, unzip
-  -> sideload from Windows: Sideloadly, AltServer, or iPASide, free Apple ID
-  -> Files -> On My iPhone -> Gabbro -> Diagnostics  for M0 numbers
-```
+**Hand the note to Obsidian yourself.** Gabbro renders markdown with YAML
+frontmatter and gives it to the iOS share sheet. Tap, pick Obsidian, done.
 
-The repo is **public**, which is what makes macOS runner minutes unlimited and free. On a
-private repo they carry a 10x multiplier (~200 macOS minutes/month on the free tier).
+**A queue you can see.** Transcription takes as long as it takes. Every
+recording shows what is happening to it — queued, transcribing with a
+percentage, ready to share — and the queue resumes on its own whenever you open
+the app.
 
-No debugger, no Instruments, no live console. That is survivable here because M0 is
-measurement work rather than breakpoint work — the app instruments itself. See
-[`docs/M0-RUNBOOK.md`](docs/M0-RUNBOOK.md). When chasing something on-device, add
-`M0Telemetry.shared.noteEvent("...")` calls rather than log lines: events land in the report
-with timestamps, `OSLog` output does not reach you.
+**Storage that looks after itself.** Audio is kept for 30 days and then removed
+automatically; transcripts and notes are kept forever. Swipe any recording to
+delete it outright. The app tells you what it freed and how much is on disk.
 
-### If you do get to a Mac
+## Why it works this way
 
-The repo has no `.xcodeproj`. It is described by [`project.yml`](project.yml) and generated
-with [XcodeGen](https://github.com/yonaskolb/XcodeGen), which keeps it diffable and
-authorable from a non-Mac.
+**It is an app, not an Obsidian plugin.** Obsidian on iOS runs inside a
+Capacitor WebView, which has no route to CoreML. On-device transcription is not
+possible from a plugin, at any level of effort.
 
-```sh
-brew install xcodegen
-xcodegen generate
-open Gabbro.xcodeproj
-```
+**It never opens your vault.** No security-scoped bookmark, no file coordinator,
+no writing into a directory that iCloud and Obsidian are both touching. Gabbro
+owns its own transcripts and hands them over through the share sheet, so it
+cannot create conflict files, cannot overwrite a note, and cannot leave a
+half-written file behind. Delivery costs one tap per note. That is the trade,
+and it removes every irreversible failure the direct-write design had.
 
-Re-run `xcodegen generate` after adding files. Do not commit the generated `.xcodeproj`.
-
-## Signing
-
-**No paid Apple Developer Program membership is required.** Sign in to Xcode with a plain
-Apple ID and let automatic signing pick your personal team.
-
-What free provisioning costs you:
-
-| Limit | Impact here |
-|---|---|
-| Certificates expire every 7 days | Re-sign from Xcode, or use SideStore to refresh on-device |
-| 3 apps installed at a time | None |
-| ~10 App IDs per 7 days | None (app + widget extension = 2) |
-| No push notifications | None — only local notifications are used |
-| **No App Groups** | **Designed around.** See below. |
-| No TestFlight | None — one user |
-
-**Do not add an App Group.** It is the only paid-only capability this design would need, and
-it was removed on purpose: a stateful Control Center toggle would need one to read recording
-state from the widget extension process. Instead the control is a stateless button and the
-Live Activity carries state — ActivityKit passes `ContentState` through the system, not
-through a shared container. Adding an App Group back puts $99/yr on the critical path.
-
-## Layout
-
-```
-project.yml                    XcodeGen spec: app + widget extension, FluidAudio pinned to 0.15.6
-Shared/                        Compiled into BOTH targets
-  RecordingActivityAttributes  Live Activity state
-  RecordingIntents             App Intents + the registry that lets them reach app-only code
-Gabbro/
-  App/                         GabbroApp, CaptureView, CaptureModel
-  Audio/                       AudioSessionManager, AudioRecorder, WAVWriter
-  Model/                       RecordingJob, JobStore
-  Transcription/               Transcriber protocol, ParakeetTranscriber, OverlapMerge, Coordinator
-  Render/                      MarkdownRenderer
-GabbroWidgets/                 Live Activity + Control Center button
-```
-
-## Four things that look wrong and are not
-
-**1. `AudioRecorder.stop()` does not stop the engine.**
-The background execution assertion is held by `mediaserverd` only while an I/O unit is
-actually moving frames — not by `setActive(true)`. Stop arrives from the Lock Screen with the
-app already backgrounded, so nothing stands between it and suspension mid-inference. The tap
-keeps running (discarding buffers) and a `beginBackgroundTask` is held until the job reaches
-`.ready`. Visible consequence: the orange mic indicator stays lit for a few seconds after you
-press Stop. Expected.
-
-**2. Transcription runs during capture, not after it.**
-While the audio session is live, `UIBackgroundModes: audio` legitimately covers inference. By
-the time you press Stop only the tail chunk remains. Record-then-transcribe would owe minutes
-of ANE work at exactly the moment the assertion is weakest.
-
-**3. The intents live in `Shared/`, not the app target.**
-The `ControlWidget` has to reference the intent type, so it must compile into the extension.
-It only ever *executes* in the app process, via `LiveActivityIntent` conformance and
-`RecordingControl_Registry`. An intent running in the widget extension process could never
-host a capture session — that process has no `UIBackgroundModes: audio`.
-
-**4. `ParakeetTranscriber` throws instead of working.**
-The source spec says, in its own words: *"Verify exact API surface against the current release
-rather than trusting this document."* FluidAudio is pre-1.0 and moves. Writing plausible
-`AsrManager` signatures from memory would look finished and fail on first build. The file
-carries the M0 checklist; fill the three TODOs from the 0.15.6 source. `StubTranscriber` wires
-the pipeline end to end meanwhile — it is the sanctioned early fake, never a shipping path.
-
-## M0 — before this is worth building on
-
-Four gates, all measured on a **20-minute live locked capture with incremental inference
-running**, not an offline file run:
-
-- **Speed** — sustained ≥ 2x real-time single-stream, measured *under lock* (CPU/ML work runs
-  markedly slower backgrounded)
-- **Memory** — `os_proc_available_memory()` ≥ 400 MB at peak, locked and backgrounded
-- **Thermal** — does not reach `.serious`
-- **Battery** — measured against the same capture with inference disabled
-
-Plus: the real model artifact size at the pinned SHA (authorized to fail the design if it is
-FP16-sized), whether FluidAudio lets you pin `computeUnits` to `.cpuAndNeuralEngine` (iPhones
-cannot use the GPU in the background — this is not optional), the locked-screen start spike,
-and the interruption spike.
-
-**A failed gate is a project stop, not a substitution.** See the design doc's M0 failure policy.
+**Whisper, not Parakeet.** Parakeet TDT is the better model for mid-sentence
+language switching and was the original choice. Its language set is the 24 EU
+official languages plus Russian and Ukrainian — which excludes Norwegian, since
+Norway is not in the EU. A hard requirement beat a quality preference. The cost
+is real and worth knowing: **Whisper decides one language per ~30 s window**, so
+a sentence that switches Swedish→English mid-flow gets forced into one of them.
 
 ## Privacy
 
-The only network activity in the app's life is the one-time model weight fetch. No analytics,
-no crash reporter, no ATS exceptions. Audio and transcripts live in `Documents/` with
-`isExcludedFromBackupKey = true` — without that they would be uploaded to iCloud Backup, which
-would contradict the whole point and which the airplane-mode test would not catch, because it
-is OS traffic rather than app traffic.
+- The only outbound request in the app's life is the one-time model download.
+- No analytics, no crash reporter, no third-party network code.
+- Audio and transcripts are excluded from iCloud backup, so recordings do not
+  travel off the phone that way either.
+- **Verified, not asserted:** a full record → transcribe → share cycle completes
+  with the device in airplane mode.
+
+## Note format
+
+```markdown
+---
+created: 2026-09-22T14:32:00+02:00
+duration: 4m12s
+language: [sv, en]
+input_route: built-in
+model: whisper-large-v3-v20240930_626MB
+tags: [voice]
+---
+
+Verbatim transcript, paragraphed on natural pauses.
+```
+
+Verbatim only. No summarising, no rewriting, no LLM touching the words you said.
+
+## Requirements
+
+- iPhone on iOS 26
+- Obsidian 1.13+ for the share target
+- ~626 MB one-time model download, Wi-Fi recommended
+- A free Apple ID. No paid developer account is needed.
+
+## Installing
+
+Personal tool, sideloaded. Grab the latest `.ipa` from
+[Releases](../../releases) — on the phone, in Safari, then open it in SideStore
+or AltStore. First launch downloads the model and shows its progress.
+
+See [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) for building it yourself, and
+the three install gates (certificate trust, Developer Mode, microphone) that
+each fail looking like one of the others.
+
+## Status
+
+Working and in daily use. Record, transcribe, share, delete and retention are
+all real, and the performance gates have been measured on device: 24× real-time
+transcription with comfortable memory headroom, nothing thermally interesting.
+
+Not yet working: the Live Activity and the Lock Screen start/stop controls,
+which need the widget extension to be signed properly.
+
+## Documentation
+
+- [Design doc](docs/designs/voice-capture-obsidian-ios.md) — the decisions, what
+  they cost, and the premises that were wrong
+- [M0 runbook](docs/M0-RUNBOOK.md) — measuring it on a real device, and the
+  operational traps
+- [Development](docs/DEVELOPMENT.md) — building from Windows with no Mac
