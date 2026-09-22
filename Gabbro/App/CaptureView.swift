@@ -10,6 +10,9 @@ struct CaptureView: View {
     /// bool keeps the job identity attached, so the completion handler marks
     /// the right note shared.
     @State private var sharingJob: RecordingJob?
+    /// Set when a swipe-delete needs confirming first. Only for recordings
+    /// whose transcript has not reached the vault yet.
+    @State private var pendingDelete: RecordingJob?
 
     var body: some View {
         NavigationStack {
@@ -42,6 +45,21 @@ struct CaptureView: View {
 
                 List(model.jobs) { job in
                     row(for: job)
+                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                            Button(role: .destructive) {
+                                // Confirm only when it would destroy the only
+                                // copy. Once a note is in Obsidian, deleting
+                                // the local original is not destructive and an
+                                // extra tap is just friction.
+                                if model.deleteIsLastCopy(job) {
+                                    pendingDelete = job
+                                } else {
+                                    Task { await model.delete(job) }
+                                }
+                            } label: {
+                                Label("Delete", systemImage: "trash")
+                            }
+                        }
                 }
                 .listStyle(.plain)
             }
@@ -58,6 +76,20 @@ struct CaptureView: View {
             // "Queued" row would sit there until the user tapped something.
             .onChange(of: scenePhase) { _, phase in
                 if phase == .active { Task { await model.resumeQueue() } }
+            }
+            .confirmationDialog(
+                "Delete this recording?",
+                isPresented: .constant(pendingDelete != nil),
+                titleVisibility: .visible,
+                presenting: pendingDelete
+            ) { job in
+                Button("Delete recording and audio", role: .destructive) {
+                    Task { await model.delete(job) }
+                    pendingDelete = nil
+                }
+                Button("Cancel", role: .cancel) { pendingDelete = nil }
+            } message: { _ in
+                Text("This has not been shared to Obsidian yet, so the audio is the only copy. Deleting cannot be undone.")
             }
             .sheet(item: $sharingJob) { job in
                 if let url = model.noteURL(for: job) {

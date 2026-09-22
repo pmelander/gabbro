@@ -369,6 +369,31 @@ public final class CaptureModel: RecordingControlHandling {
         jobs = await JobStore.shared.all()
     }
 
+    /// Deletes the recording, its audio and the rendered note on this device.
+    ///
+    /// Refuses while the job is in flight — deleting audio out from under a
+    /// running transcription would leave the coordinator reading a file that
+    /// no longer exists.
+    public func delete(_ job: RecordingJob) async {
+        guard transcribingJobID != job.id,
+              !(recorder.isRecording && recorder.job?.id == job.id) else {
+            lastError = "That recording is still being worked on."
+            return
+        }
+        if let url = noteURL(for: job) {
+            try? FileManager.default.removeItem(at: url)
+        }
+        try? await JobStore.shared.delete(job.id)
+        jobs = await JobStore.shared.all()
+    }
+
+    /// True when deleting would destroy the only copy — the transcript has not
+    /// reached the vault yet, so there is nothing to fall back on. Drives
+    /// whether the UI asks first.
+    public func deleteIsLastCopy(_ job: RecordingJob) -> Bool {
+        job.state != .shared
+    }
+
     /// Re-sharing is allowed but warns: Obsidian's picker will not deduplicate
     /// and you get a second note.
     public func wouldDuplicate(_ job: RecordingJob) -> Bool {

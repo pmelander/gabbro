@@ -215,6 +215,22 @@ public actor JobStore {
         try save()
     }
 
+    /// Removes a job and its audio entirely.
+    ///
+    /// Irreversible, and the design says so: the recording is the only
+    /// recovery path for a bad transcript, which makes this the one remaining
+    /// one-way operation in the app. It never touches the vault — a note
+    /// already shared into Obsidian belongs to the user, not to us.
+    public func delete(_ id: UUID) throws {
+        guard let job = jobs[id] else { return }
+        for segment in job.segments {
+            try? fm.removeItem(at: audioDirectory.appendingPathComponent(segment.filename))
+        }
+        jobs.removeValue(forKey: id)
+        try save()
+        log.notice("Deleted job \(id, privacy: .public) and \(job.segments.count, privacy: .public) segment(s)")
+    }
+
     public func totalStoreBytes() -> Int64 {
         var total: Int64 = 0
         for dir in [audioDirectory, notesDirectory] {
