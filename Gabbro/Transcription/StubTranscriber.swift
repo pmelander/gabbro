@@ -20,7 +20,7 @@ public actor StubTranscriber: Transcriber {
         self.fixture = fixture
     }
 
-    public func prepare() async throws {}
+    public func prepare(progress: @escaping @Sendable (Double) -> Void) async throws { progress(1) }
 
     public func feed(_ samples: [Float], isLast: Bool) async throws -> TranscriptionResult {
         let duration = Double(samples.count) / Double(WAVWriter.sampleRate)

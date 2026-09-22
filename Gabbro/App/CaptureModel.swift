@@ -23,6 +23,24 @@ public final class CaptureModel: RecordingControlHandling {
 
     public private(set) var jobs: [RecordingJob] = []
     public private(set) var lastError: String?
+
+    /// Where the speech model is up to.
+    ///
+    /// This exists because the first build shipped without it and the app was
+    /// unusable: `start()` awaited a prepare that downloaded ~626 MB before
+    /// returning, so the record button sat dead for minutes with nothing on
+    /// screen. The source spec had already called this out -- "show a real
+    /// progress indicator; this is the app's worst first-run moment".
+    public enum ModelState: Equatable {
+        case idle
+        case downloading(Double)   // 0...1
+        case loading
+        case ready
+        case failed(String)
+
+        public var isReady: Bool { self == .ready }
+    }
+    public private(set) var modelState: ModelState = .idle
     private var activity: Activity<RecordingActivityAttributes>?
 
     private init() {
@@ -74,9 +92,10 @@ public final class CaptureModel: RecordingControlHandling {
             jobs = await JobStore.shared.all()
             _ = try? await UNUserNotificationCenter.current()
                 .requestAuthorization(options: [.alert, .sound])
-            // Anything recovered at launch (force-quit, jetsam, or an
-            // interruption whose .ended never arrived) is finished here.
-            await drainPending()
+            // Model preparation runs at LAUNCH, not on first record tap, and
+            // in its own task so the UI comes up immediately and can show the
+            // download. Pending jobs wait for it — they need the model too.
+            Task { await self.prepareModel() }
         } catch {
             lastError = error.localizedDescription
         }
@@ -89,7 +108,33 @@ public final class CaptureModel: RecordingControlHandling {
     /// battery number means nothing; the ratio is the decision.
     public var inferenceEnabled = true
 
+    /// Downloads and loads the speech model, reporting progress as it goes.
+    /// Safe to call again after a failure — that is what the Retry button does.
+    public func prepareModel() async {
+        guard !modelState.isReady else { return }
+        modelState = .downloading(0)
+        do {
+            try await coordinator.prepare { fraction in
+                Task { @MainActor in
+                    // Downloading until the bytes are in; loading and warming
+                    // the model afterwards is its own wait worth naming.
+                    self.modelState = fraction >= 1 ? .loading : .downloading(fraction)
+                }
+            }
+            modelState = .ready
+            // Anything recovered at launch (force-quit, jetsam, or an
+            // interruption whose .ended never arrived) can finish now.
+            await drainPending()
+        } catch {
+            modelState = .failed(error.localizedDescription)
+        }
+    }
+
     public func start() async {
+        guard modelState.isReady else {
+            lastError = "The speech model is not ready yet."
+            return
+        }
         // Ask before checking. This is the foreground path, so it is the only
         // place that CAN prompt — the Lock Screen intent cannot, which is why
         // it only ever checks.
@@ -113,7 +158,6 @@ public final class CaptureModel: RecordingControlHandling {
 
         Breadcrumbs.drop(Breadcrumbs.Marker.startBegin)
         do {
-            try await coordinator.prepare()
             try await recorder.start()
             if let job = recorder.job {
                 await M0Telemetry.shared.begin(jobID: job.id, inferenceEnabled: inferenceEnabled)

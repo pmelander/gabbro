@@ -52,10 +52,25 @@ public actor WhisperTranscriber: Transcriber {
         self.modelIdentifier = "whisper-\(modelName)"
     }
 
-    public func prepare() async throws {
-        guard pipe == nil else { return }
+    public func prepare(progress: @escaping @Sendable (Double) -> Void) async throws {
+        guard pipe == nil else { progress(1); return }
         let started = ContinuousClock.now
-        pipe = try await WhisperKit(WhisperKitConfig(model: modelName))
+
+        // Two phases on purpose. `WhisperKit(WhisperKitConfig(model:))` would
+        // download and load in one opaque call that returns only when it is
+        // finished — which is exactly the several-minute silence that made the
+        // record button look broken. Downloading separately gives a real
+        // fraction to show.
+        let folder = try await WhisperKit.download(variant: modelName) { p in
+            progress(p.fractionCompleted)
+        }
+        progress(1)
+
+        // download: false — it is already on disk, do not re-fetch.
+        pipe = try await WhisperKit(WhisperKitConfig(
+            modelFolder: folder.path,
+            download: false
+        ))
         elapsed = 0
         let took = ContinuousClock.now - started
         log.notice("WhisperKit ready: \(self.modelName, privacy: .public) in \(took.components.seconds, privacy: .public)s")

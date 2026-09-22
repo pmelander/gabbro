@@ -12,9 +12,14 @@ import Foundation
 /// it is what let the whole capture, render and share path be proven before
 /// any model existed.
 public protocol Transcriber: Sendable {
-    /// Loads the model. Expensive; call once. Cold load time is an M0
-    /// measurement, reported separately so it cannot skew the speed gate.
-    func prepare() async throws
+    /// Loads the model. Expensive; call once, at launch, not on first use.
+    ///
+    /// The first call downloads several hundred MB. `progress` reports 0...1
+    /// so the UI can show it — the source spec called this "the app's worst
+    /// first-run moment" and it is the one place a silent wait is unacceptable.
+    /// Cold load time is an M0 measurement, reported separately so it cannot
+    /// skew the speed gate.
+    func prepare(progress: @escaping @Sendable (Double) -> Void) async throws
 
     /// Feed the next slice of audio, in recording order.
     ///

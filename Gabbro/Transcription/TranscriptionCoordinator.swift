@@ -60,11 +60,11 @@ public actor TranscriptionCoordinator {
         self.transcriber = transcriber
     }
 
-    public func prepare() async throws {
+    public func prepare(progress: @escaping @Sendable (Double) -> Void) async throws {
         // Cold model load is a one-off cost, reported separately from
         // steady-state throughput so it cannot skew the speed gate.
         let started = ContinuousClock.now
-        try await transcriber.prepare()
+        try await transcriber.prepare(progress: progress)
         await M0Telemetry.shared.noteModelLoad(
             seconds: Self.seconds(ContinuousClock.now - started),
             artifactBytes: nil // M0 step 1: record the real artifact size here.

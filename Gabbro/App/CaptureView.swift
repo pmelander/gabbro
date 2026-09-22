@@ -15,6 +15,8 @@ struct CaptureView: View {
             VStack(spacing: 24) {
                 recordButton
 
+                modelStatus
+
                 if model.recorder.isRecording {
                     Text("Recording — you can lock the phone")
                         .font(.footnote)
@@ -65,10 +67,60 @@ struct CaptureView: View {
         } label: {
             Image(systemName: model.recorder.isRecording ? "stop.circle.fill" : "mic.circle.fill")
                 .font(.system(size: 88))
-                .foregroundStyle(model.recorder.isRecording ? .red : .accentColor)
+                .foregroundStyle(tintForRecordButton)
         }
         .buttonStyle(.plain)
+        // Disabled until the model is on disk and loaded. Previously this was
+        // tappable during a multi-minute download and simply did nothing,
+        // which read as a broken app.
+        .disabled(!model.modelState.isReady && !model.recorder.isRecording)
         .accessibilityLabel(model.recorder.isRecording ? "Stop recording" : "Start recording")
+    }
+
+    private var tintForRecordButton: Color {
+        if model.recorder.isRecording { return .red }
+        return model.modelState.isReady ? .accentColor : .secondary
+    }
+
+    /// Never leave the first run silent. A several-hundred-MB download with no
+    /// indicator is indistinguishable from a hang.
+    @ViewBuilder
+    private var modelStatus: some View {
+        switch model.modelState {
+        case .idle:
+            Label("Preparing…", systemImage: "hourglass")
+                .font(.footnote).foregroundStyle(.secondary)
+
+        case .downloading(let fraction):
+            VStack(spacing: 6) {
+                ProgressView(value: fraction)
+                    .frame(maxWidth: 260)
+                Text("Downloading speech model — \(Int(fraction * 100))%")
+                    .font(.footnote).foregroundStyle(.secondary)
+                Text("One time, a few hundred MB. Wi-Fi recommended.")
+                    .font(.caption2).foregroundStyle(.tertiary)
+            }
+
+        case .loading:
+            VStack(spacing: 6) {
+                ProgressView()
+                Text("Loading model onto the Neural Engine…")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
+
+        case .ready:
+            EmptyView()
+
+        case .failed(let reason):
+            VStack(spacing: 8) {
+                Label(reason, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(.orange)
+                    .multilineTextAlignment(.center)
+                Button("Retry") { Task { await model.prepareModel() } }
+                    .buttonStyle(.bordered)
+            }
+            .padding(.horizontal)
+        }
     }
 
     @ViewBuilder
