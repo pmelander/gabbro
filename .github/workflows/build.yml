@@ -73,6 +73,12 @@ jobs:
               || /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $BUILD" "$plist"
           done
           echo "BUILD_STAMP=$BUILD" >> $GITHUB_ENV
+          # Filename-safe variant. The .ipa files are named with this so a
+          # download cannot silently overwrite a different build -- which is
+          # exactly what happened: two .ipas both called
+          # Gabbro-no-extension.ipa, and an older build got sideloaded and
+          # debugged for a round.
+          echo "FILE_STAMP=b${{ github.run_number }}-${SHORT_SHA}" >> $GITHUB_ENV
 
       # Surfaced as its own step so a FluidAudio resolution failure reads as
       # "the pinned dependency moved" rather than a compile error 20 lines
@@ -115,9 +121,9 @@ jobs:
           fi
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
-          zip -qry Gabbro.ipa Payload
+          zip -qry "Gabbro-${FILE_STAMP}.ipa" Payload
           echo "--- ipa ---"
-          ls -lh Gabbro.ipa
+          ls -lh "Gabbro-${FILE_STAMP}.ipa"
           echo "--- embedded binaries ---"
           ls -la Payload/Gabbro.app/PlugIns/ 2>/dev/null || echo "(no PlugIns — widget extension did not embed)"
 
@@ -153,9 +159,9 @@ jobs:
           rm -rf NoExt && mkdir -p NoExt
           cp -R Payload NoExt/Payload
           rm -rf NoExt/Payload/Gabbro.app/PlugIns
-          (cd NoExt && zip -qry ../Gabbro-no-extension.ipa Payload)
-          ls -lh Gabbro-no-extension.ipa
-          shasum -a 256 Gabbro-no-extension.ipa | tee Gabbro-no-extension.ipa.sha256
+          (cd NoExt && zip -qry "../Gabbro-${FILE_STAMP}-no-extension.ipa" Payload)
+          ls -lh "Gabbro-${FILE_STAMP}-no-extension.ipa"
+          shasum -a 256 "Gabbro-${FILE_STAMP}-no-extension.ipa"             | tee "Gabbro-${FILE_STAMP}-no-extension.ipa.sha256"
 
       # Windows antivirus will often flag this download: a nested archive
       # around an unsigned, zero-reputation executable is textbook heuristic
@@ -172,17 +178,17 @@ jobs:
           echo "Two variants are published: the full app, and one with the widget extension" >> $GITHUB_STEP_SUMMARY
           echo "stripped for when the appex will not sign. SHA256 of \`Gabbro.ipa\` as built:" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
-          shasum -a 256 Gabbro.ipa | tee -a $GITHUB_STEP_SUMMARY
+          shasum -a 256 "Gabbro-${FILE_STAMP}.ipa" | tee -a $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "On Windows: \`certutil -hashfile Gabbro.ipa SHA256\`" >> $GITHUB_STEP_SUMMARY
+          echo "On Windows: \`certutil -hashfile Gabbro-${FILE_STAMP}.ipa SHA256\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "<details><summary>Everything inside the .ipa</summary>" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
-          unzip -l Gabbro.ipa >> $GITHUB_STEP_SUMMARY
+          unzip -l "Gabbro-${FILE_STAMP}.ipa" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo "</details>" >> $GITHUB_STEP_SUMMARY
-          shasum -a 256 Gabbro.ipa > Gabbro.ipa.sha256
+          shasum -a 256 "Gabbro-${FILE_STAMP}.ipa" > "Gabbro-${FILE_STAMP}.ipa.sha256"
           echo "--- linked libraries (nothing should be unexpected) ---"
           otool -L Payload/Gabbro.app/Gabbro | head -40
 
@@ -191,10 +197,8 @@ jobs:
         with:
           name: Gabbro-unsigned-${{ github.sha }}
           path: |
-            Gabbro.ipa
-            Gabbro.ipa.sha256
-            Gabbro-no-extension.ipa
-            Gabbro-no-extension.ipa.sha256
+            Gabbro-*.ipa
+            Gabbro-*.ipa.sha256
           retention-days: 30
           if-no-files-found: error
 
@@ -211,10 +215,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            Gabbro.ipa
-            Gabbro.ipa.sha256
-            Gabbro-no-extension.ipa
-            Gabbro-no-extension.ipa.sha256
+            Gabbro-*.ipa
+            Gabbro-*.ipa.sha256
           generate_release_notes: true
           body: |
             Unsigned build for personal sideloading. Sign it yourself with a free Apple ID.
