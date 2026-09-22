@@ -50,6 +50,13 @@ public final class CaptureModel: RecordingControlHandling {
     /// duplicate background tasks, duplicate telemetry runs and a job written
     /// twice.
     private var lifecycleBusy = false
+
+    /// Non-nil while a transcript is being caught up, 0...1.
+    ///
+    /// A 25-minute recording can take many minutes to transcribe after Stop.
+    /// Leaving that silent is the same mistake as the model download: the app
+    /// looks hung when it is working.
+    public private(set) var transcribeProgress: Double?
     private var activity: Activity<RecordingActivityAttributes>?
 
     private init() {
@@ -249,7 +256,10 @@ public final class CaptureModel: RecordingControlHandling {
             // exclusivity checks. Landing the result in a separate constant
             // first means the read and the write cannot share a window.
             Breadcrumbs.drop("stop:before-drain-call")
-            let drained = await coordinator.drain(job: job)
+            let drained = await coordinator.drain(job: job, isLive: false) { fraction in
+                Task { @MainActor in self.transcribeProgress = fraction }
+            }
+            transcribeProgress = nil
             Breadcrumbs.drop("stop:after-drain-call")
             job = drained
             Breadcrumbs.drop("stop:after-drain-assign")
@@ -304,7 +314,10 @@ public final class CaptureModel: RecordingControlHandling {
 
     private func drainPending() async {
         for pending in await JobStore.shared.pendingWork() {
-            let finished = await coordinator.drain(job: pending)
+            let finished = await coordinator.drain(job: pending, isLive: false) { fraction in
+                Task { @MainActor in self.transcribeProgress = fraction }
+            }
+            transcribeProgress = nil
             try? await JobStore.shared.upsert(finished)
             if finished.state == .ready {
                 _ = try? renderer.write(

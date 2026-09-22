@@ -17,6 +17,16 @@ struct CaptureView: View {
 
                 modelStatus
 
+                if let fraction = model.transcribeProgress {
+                    VStack(spacing: 6) {
+                        ProgressView(value: fraction).frame(maxWidth: 260)
+                        Text("Transcribing — \(Int(fraction * 100))%")
+                            .font(.footnote).foregroundStyle(.secondary)
+                        Text("Runs on device. Safe to lock the phone.")
+                            .font(.caption2).foregroundStyle(.tertiary)
+                    }
+                }
+
                 if model.recorder.isRecording {
                     Text("Recording — you can lock the phone")
                         .font(.footnote)

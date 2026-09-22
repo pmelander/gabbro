@@ -75,8 +75,19 @@ public actor TranscriptionCoordinator {
     ///
     /// Returns a NEW job value. Safe to call repeatedly: it resumes from
     /// `transcribedFrames` and the recovery unit is the whole chunk.
+    /// - Parameters:
+    ///   - isLive: true only while the recorder is still capturing. The
+    ///     backlog abandon threshold applies ONLY then. After Stop there is no
+    ///     more audio arriving, so falling behind is meaningless — the work
+    ///     simply has to be done, however long it takes.
+    ///   - progress: 0...1 over the job's total frames, so a long catch-up is
+    ///     not a silent wait.
     @discardableResult
-    public func drain(job input: RecordingJob) async -> RecordingJob {
+    public func drain(
+        job input: RecordingJob,
+        isLive: Bool = false,
+        progress: (@Sendable (Double) -> Void)? = nil
+    ) async -> RecordingJob {
         // One immutable copy of the segment list, and plain value locals for
         // everything that changes. Nothing below touches `input` again until
         // `assemble` builds the result. See the type doc for why.
@@ -85,7 +96,7 @@ public actor TranscriptionCoordinator {
         await transcriber.reset()
 
         let segments = input.segments
-        var progress = segments.map(\.transcribedFrames)
+        var progressFrames = segments.map(\.transcribedFrames)
         var languages = input.detectedLanguages
         var tokens: [Token] = []
         // Telemetry is accumulated here and submitted once after the loops.
@@ -93,32 +104,40 @@ public actor TranscriptionCoordinator {
         // suspension points inside a loop that mutates locals.
         var chunkTimings: [(audioSeconds: Double, wallSeconds: Double)] = []
         var maxBacklog = 0.0
+        let totalFrames = segments.reduce(0) { $0 + $1.frameCount }
 
         for index in 0..<segments.count {
             let segment = segments[index]
             let url = JobStore.shared.audioDirectory.appendingPathComponent(segment.filename)
-            var offset = progress[index]
+            var offset = progressFrames[index]
             let isFinalSegment = index == segments.count - 1
 
             while offset < segment.frameCount {
-                let backlog = Self.backlogSeconds(segments: segments, progress: progress)
+                let backlog = Self.backlogSeconds(segments: segments, progress: progressFrames)
 
                 if ThermalPolicy.shouldSuspend {
                     log.notice("Thermal suspend at \(backlog, privacy: .public)s backlog")
                     let note = "thermal suspend at \(Int(backlog))s backlog"
                     Task { await M0Telemetry.shared.noteEvent(note) }
                     return Self.assemble(
-                        input, progress: progress, languages: languages, transcript: nil,
+                        input, progress: progressFrames, languages: languages, transcript: nil,
                         state: .captured, reason: "Device too warm; will finish when it cools"
                     )
                 }
-                if backlog > Self.abandonThresholdSeconds {
+                // Only while capture is running. Post-Stop this check was
+                // catastrophic rather than protective: a 25-minute recording
+                // arrives with a ~1500 s backlog, the test fired on the very
+                // first iteration, and the job returned `captured` having
+                // transcribed nothing. drainPending() at next launch hit the
+                // same wall, so the job could NEVER complete. It read as
+                // "still working" and was in fact permanently stuck.
+                if isLive, backlog > Self.abandonThresholdSeconds {
                     let note = "backlog abandon threshold breached at \(Int(backlog))s"
                     Task { await M0Telemetry.shared.noteEvent(note) }
                     return Self.assemble(
-                        input, progress: progress, languages: languages, transcript: nil,
+                        input, progress: progressFrames, languages: languages, transcript: nil,
                         state: .captured,
-                        reason: "Fell behind; will finish next time you open Gabbro"
+                        reason: "Fell behind; will finish when you reopen Gabbro"
                     )
                 }
 
@@ -129,7 +148,7 @@ public actor TranscriptionCoordinator {
                 // A sliver is not worth a disk read, unless it is the very
                 // last slice -- the transcriber needs `isLast` to flush.
                 guard count >= Chunking.minFeedFrames || isFinalSlice else {
-                    progress[index] = segment.frameCount
+                    progressFrames[index] = segment.frameCount
                     break
                 }
 
@@ -161,14 +180,19 @@ public actor TranscriptionCoordinator {
                     // always retained, so nothing here is terminal.
                     log.error("Slice failed: \(error.localizedDescription, privacy: .public)")
                     return Self.assemble(
-                        input, progress: progress, languages: languages, transcript: nil,
+                        input, progress: progressFrames, languages: languages, transcript: nil,
                         state: .failed, failure: error.localizedDescription
                     )
                 }
 
                 // Straight advance, no overlap to back up over.
                 offset += count
-                progress[index] = offset
+                progressFrames[index] = offset
+
+                if let progress, totalFrames > 0 {
+                    let done = progressFrames.reduce(0, +)
+                    progress(min(1, Double(done) / Double(totalFrames)))
+                }
 
                 await ThermalPolicy.yieldIfThrottled()
             }
@@ -177,7 +201,7 @@ public actor TranscriptionCoordinator {
         await M0Telemetry.shared.noteChunks(chunkTimings, maxBacklogSeconds: maxBacklog)
         let transcript = renderer.paragraphs(from: tokens)
         return Self.assemble(
-            input, progress: progress, languages: languages, transcript: transcript,
+            input, progress: progressFrames, languages: languages, transcript: transcript,
             state: transcript.isEmpty ? .failed : .ready,
             failure: transcript.isEmpty ? "No speech detected" : nil
         )
