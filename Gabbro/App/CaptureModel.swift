@@ -16,6 +16,10 @@ public final class CaptureModel: RecordingControlHandling {
     public let recorder = AudioRecorder()
     private let coordinator: TranscriptionCoordinator
     private let renderer = MarkdownRenderer()
+    /// Recorded in the note frontmatter. Read once here rather than per write,
+    /// and from the transcriber rather than a hardcoded constant, because the
+    /// engine itself is currently an open question.
+    private let modelIdentifier: String
 
     public private(set) var jobs: [RecordingJob] = []
     public private(set) var lastError: String?
@@ -26,7 +30,9 @@ public final class CaptureModel: RecordingControlHandling {
         // proved the whole capture/render/share path before the model existed,
         // and six crash-fix cycles ran through it without the model muddying
         // the picture — but nothing reaches it now.
-        self.coordinator = TranscriptionCoordinator(transcriber: ParakeetTranscriber())
+        let transcriber = StubTranscriber()
+        self.coordinator = TranscriptionCoordinator(transcriber: transcriber)
+        self.modelIdentifier = transcriber.modelIdentifier
     }
 
     // MARK: - RecordingControlHandling
@@ -164,7 +170,7 @@ public final class CaptureModel: RecordingControlHandling {
         if job.state == .ready {
             _ = try? renderer.write(
                 job: job,
-                modelRevision: ParakeetTranscriber.modelRevision,
+                modelRevision: modelIdentifier,
                 to: JobStore.shared.notesDirectory
             )
         }
@@ -189,6 +195,7 @@ public final class CaptureModel: RecordingControlHandling {
     /// Holds a background task id so the expiration handler can end it
     /// synchronously without capturing a local `var` it also assigns to.
     /// `end()` is idempotent, because both the handler and the `defer` call it.
+    @MainActor
     private final class BackgroundTaskBox {
         private let lock = NSLock()
         var id: UIBackgroundTaskIdentifier = .invalid
@@ -208,7 +215,7 @@ public final class CaptureModel: RecordingControlHandling {
             if finished.state == .ready {
                 _ = try? renderer.write(
                     job: finished,
-                    modelRevision: ParakeetTranscriber.modelRevision,
+                    modelRevision: modelIdentifier,
                     to: JobStore.shared.notesDirectory
                 )
             }

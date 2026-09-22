@@ -91,6 +91,29 @@ jobs:
           echo "--- resolved ---"
           cat Gabbro.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved || true
 
+      # Print FluidAudio's REAL public ASR surface from the checked-out source.
+      #
+      # The published docs describe `main`, not the tag we pin, and a build
+      # written against them failed on every single signature:
+      # SlidingWindowAsrManager(models:) takes no such argument and
+      # transcribeChunk does not exist on it in 0.15.6. The source is right
+      # here on the runner, so read it instead of guessing.
+      - name: Dump FluidAudio public ASR API
+        run: |
+          SRC=build/SourcePackages/checkouts/FluidAudio/Sources/FluidAudio
+          if [ ! -d "$SRC" ]; then
+            echo "::warning::FluidAudio checkout not found; skipping API dump"
+            exit 0
+          fi
+          echo "### FluidAudio public ASR API (as checked out)" >> $GITHUB_STEP_SUMMARY
+          echo '```swift' >> $GITHUB_STEP_SUMMARY
+          grep -rhn -E "^\s*public (final )?(actor|class|struct|enum|protocol|init|func|var|let)"             "$SRC/ASR" 2>/dev/null | sed 's/^[0-9]*://' | sort -u >> $GITHUB_STEP_SUMMARY || true
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "--- ASRResult / TokenTiming shape ---"
+          sed -n '1,120p' "$SRC/ASR/AsrTypes.swift" 2>/dev/null || true
+          echo "--- files ---"
+          ls -1 "$SRC/ASR" 2>/dev/null || true
+
       # Unsigned. Signing happens on Windows, at sideload time, with your free
       # Apple ID — the CI runner has no certificate and does not need one.
       # CODE_SIGNING_ALLOWED=NO must also apply to the widget extension, which

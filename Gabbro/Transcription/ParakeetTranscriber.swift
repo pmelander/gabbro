@@ -1,6 +1,5 @@
 import CoreML
 import Foundation
-import FluidAudio
 import OSLog
 
 /// Parakeet TDT 0.6B v3 on the Apple Neural Engine, via FluidAudio.
@@ -43,66 +42,36 @@ public actor ParakeetTranscriber: Transcriber {
     /// pinned at all is an open M0 question.
     public static let modelRepo = "FluidInference/parakeet-tdt-0.6b-v3-coreml"
 
-    private var manager: SlidingWindowAsrManager?
-    /// Highest token start time accepted so far.
-    ///
-    /// Guards against double-counting if `transcribeChunk` turns out to return
-    /// cumulative rather than incremental tokens — the docs do not say which,
-    /// and appending blindly would duplicate the entire transcript per slice.
-    /// Filtering on a monotonically increasing start time is correct either
-    /// way, so this does not need the answer.
-    private var lastAcceptedStart: TimeInterval = -1
-
     public init() {}
 
     public let reportsDetectedLanguage = false
+    public let modelIdentifier = "parakeet-tdt-0.6b-v3"
+
+    // HELD: the engine choice is reopened, so this deliberately calls no
+    // FluidAudio API rather than guessing at one.
+    //
+    // The first build against the documented signatures failed on every one:
+    // `SlidingWindowAsrManager(models:)` took no such argument, and
+    // `transcribeChunk` does not exist on that type in 0.15.6. The published
+    // docs describe `main`, not the pinned tag, so they are not a usable
+    // source. CI now dumps the real public API from the checked-out source --
+    // that dump is the ground truth to implement against.
+    //
+    // More importantly, Parakeet v3 cannot serve Norwegian at all, which is a
+    // stated non-negotiable. Implementing against the right signatures is
+    // wasted if the engine changes, so this waits on that decision.
 
     public func prepare() async throws {
-        guard manager == nil else { return }
-
-        // ~460 MB per the source spec, but unverified: the HF repo holds
-        // several quantisation variants (INT8, int8-linear, Int4 encoders with
-        // an unquantised decoder — no FP16) and its 3.59 GB total is the whole
-        // repo including history, not a download. Record the real figure on
-        // device; M0 step 1 is authorised to fail the design if it is
-        // FP16-sized.
-        let models = try await AsrModels.downloadAndLoad(version: .v3)
-        manager = try await SlidingWindowAsrManager(models: models)
-        lastAcceptedStart = -1
-        log.notice("Parakeet v3 loaded")
-
-        // COMPUTE UNITS — verify on device, this is not cosmetic.
-        //
-        // iPhone apps cannot use the GPU in the background. CoreML's default
-        // is .all, which includes it, so if any part of the encoder or the TDT
-        // decode loop lands on the GPU then inference fails on exactly the
-        // locked-screen path this whole architecture depends on.
-        //
-        // FluidAudio's VadManager takes MLComputeUnits and defaults to
-        // .cpuAndNeuralEngine, and the ASR config is reported to as well — but
-        // API.md does not document it on the ASR managers. If it cannot be
-        // set, that is a design-level finding, not a note.
-        // "Zero GPU work scheduled while locked" is an M0 pass condition.
+        throw TranscriberError.modelUnavailable(
+            "Engine decision pending: Parakeet v3 has no Norwegian. See the design doc."
+        )
     }
 
     public func feed(_ samples: [Float], isLast: Bool) async throws -> TranscriptionResult {
-        guard let manager else { throw TranscriberError.notPrepared }
-
-        let result = try await manager.transcribeChunk(samples, isLastChunk: isLast)
-        let timings = result.tokenTimings ?? []
-
-        var fresh: [Token] = []
-        for timing in timings where timing.startTime > lastAcceptedStart {
-            fresh.append(Token(text: timing.token, start: timing.startTime, end: timing.endTime))
-            lastAcceptedStart = timing.startTime
-        }
-        return TranscriptionResult(tokens: fresh)
+        throw TranscriberError.notPrepared
     }
 
-    public func reset() async {
-        manager?.reset()
-        lastAcceptedStart = -1
-    }
+    public func reset() async {}
 }
 
 /// A transcriber that returns fixed text, for wiring the pipeline end to end
@@ -120,6 +89,7 @@ public actor StubTranscriber: Transcriber {
     private var elapsed: TimeInterval = 0
 
     public let reportsDetectedLanguage = false
+    public let modelIdentifier = "stub"
 
     public init(fixture: String = "Det här är en testinspelning. This is a test recording.") {
         self.fixture = fixture

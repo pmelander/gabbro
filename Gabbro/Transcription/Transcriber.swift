@@ -30,6 +30,11 @@ public protocol Transcriber: Sendable {
     /// Discard streaming state. Call before feeding a different recording.
     func reset() async
 
+    /// What produced the transcript, for the note's frontmatter. On the
+    /// protocol rather than on a concrete type because the engine itself is
+    /// now in question -- see the design doc on Norwegian.
+    nonisolated var modelIdentifier: String { get }
+
     /// Whether the backing model reports a detected language at all.
     ///
     /// Parakeet v3 takes no language *input* — detection is strictly
@@ -38,7 +43,7 @@ public protocol Transcriber: Sendable {
     /// `ASRResult` exposes text, confidence and token timings. So this is
     /// false and `MarkdownRenderer` omits the frontmatter `language` field
     /// entirely rather than emitting a guess.
-    var reportsDetectedLanguage: Bool { get }
+    nonisolated var reportsDetectedLanguage: Bool { get }
 }
 
 public struct TranscriptionResult: Sendable {
