@@ -65,7 +65,7 @@ targets:
       path: Gabbro/Info.plist
       properties:
         CFBundleDisplayName: Gabbro
-        CFBundleShortVersionString: "0.1.0"
+        CFBundleShortVersionString: "0.2.0"
         CFBundleVersion: "1"
         UILaunchScreen: {}
         UIBackgroundModes:
@@ -113,7 +113,7 @@ targets:
       path: GabbroWidgets/Info.plist
       properties:
         CFBundleDisplayName: Gabbro Widgets
-        CFBundleShortVersionString: "0.1.0"
+        CFBundleShortVersionString: "0.2.0"
         CFBundleVersion: "1"
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
