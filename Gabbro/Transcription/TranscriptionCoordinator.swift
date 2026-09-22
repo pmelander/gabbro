@@ -88,6 +88,11 @@ public actor TranscriptionCoordinator {
         var languages = input.detectedLanguages
         Breadcrumbs.drop("drain:copied-languages")
         var tokens: [Token] = []
+        // Telemetry is accumulated here and submitted once after the loops.
+        // Three actor hops per chunk was both wasteful and three extra
+        // suspension points inside a loop that mutates locals.
+        var chunkTimings: [(audioSeconds: Double, wallSeconds: Double)] = []
+        var maxBacklog = 0.0
         Breadcrumbs.drop("drain:locals-ready")
 
         for index in 0..<segments.count {
@@ -104,16 +109,19 @@ public actor TranscriptionCoordinator {
 
                 if ThermalPolicy.shouldSuspend {
                     log.notice("Thermal suspend at \(backlog, privacy: .public)s backlog")
-                    await M0Telemetry.shared.noteEvent("thermal suspend at \(Int(backlog))s backlog")
+                    // Fire-and-forget: an await here would be another
+                    // suspension inside the region that mutates this
+                    // function's locals, which is the shape that crashed it.
+                    let note = "thermal suspend at \(Int(backlog))s backlog"
+                    Task { await M0Telemetry.shared.noteEvent(note) }
                     return Self.assemble(
                         input, progress: progress, languages: languages, transcript: nil,
                         state: .captured, reason: "Device too warm; will finish when it cools"
                     )
                 }
                 if backlog > Self.abandonThresholdSeconds {
-                    await M0Telemetry.shared.noteEvent(
-                        "backlog abandon threshold breached at \(Int(backlog))s"
-                    )
+                    let note = "backlog abandon threshold breached at \(Int(backlog))s"
+                    Task { await M0Telemetry.shared.noteEvent(note) }
                     return Self.assemble(
                         input, progress: progress, languages: languages, transcript: nil,
                         state: .captured,
@@ -145,12 +153,12 @@ public actor TranscriptionCoordinator {
                     let started = ContinuousClock.now
                     let result = try await transcriber.transcribe(samples: samples)
                     Breadcrumbs.drop("drain:seg\(index):transcribed")
-                    await M0Telemetry.shared.noteChunk(
+                    chunkTimings.append((
                         audioSeconds: Double(count) / Double(WAVWriter.sampleRate),
                         wallSeconds: Self.seconds(ContinuousClock.now - started)
-                    )
-                    await M0Telemetry.shared.noteBacklog(seconds: backlog)
-                    Breadcrumbs.drop("drain:seg\(index):telemetry-ok")
+                    ))
+                    maxBacklog = max(maxBacklog, backlog)
+                    Breadcrumbs.drop("drain:seg\(index):timing-recorded")
 
                     tokens = OverlapMerge.merge(tokens, with: result.tokens)
                     Breadcrumbs.drop("drain:seg\(index):merged tokens=\(tokens.count)")
@@ -190,6 +198,8 @@ public actor TranscriptionCoordinator {
         }
 
         Breadcrumbs.drop("drain:loops-done")
+        await M0Telemetry.shared.noteChunks(chunkTimings, maxBacklogSeconds: maxBacklog)
+        Breadcrumbs.drop("drain:telemetry-submitted")
         let transcript = renderer.paragraphs(from: tokens)
         Breadcrumbs.drop("drain:paragraphs chars=\(transcript.count)")
         return Self.assemble(

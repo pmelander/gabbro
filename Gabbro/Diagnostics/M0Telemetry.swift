@@ -108,6 +108,26 @@ public actor M0Telemetry {
 
     // MARK: - Recording events
 
+    /// Submit a whole run of chunks at once.
+    ///
+    /// `drain` used to `await` this actor three times per chunk. Each await is
+    /// a suspension point inside a loop that also mutates locals, which is
+    /// exactly the shape that produces exclusivity trouble -- and three actor
+    /// hops per chunk is wasteful regardless. The caller now accumulates into
+    /// plain values and submits once.
+    public func noteChunks(_ batch: [(audioSeconds: Double, wallSeconds: Double)],
+                           maxBacklogSeconds: Double) {
+        let now = Date()
+        let available = Self.availableMemoryBytes()
+        for item in batch {
+            run?.chunks.append(.init(
+                at: now, audioSeconds: item.audioSeconds,
+                wallSeconds: item.wallSeconds, availableBytes: available
+            ))
+        }
+        run?.maxBacklogSeconds = max(run?.maxBacklogSeconds ?? 0, maxBacklogSeconds)
+    }
+
     /// Called by `TranscriptionCoordinator` after every chunk. The ratio of
     /// these two numbers is the speed gate.
     public func noteChunk(audioSeconds: Double, wallSeconds: Double) {
