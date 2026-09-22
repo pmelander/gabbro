@@ -45,14 +45,18 @@ off. The only network activity in the app's life is one model download on first 
     the whole M0 spike. The decision stands; owning the instrument is the project.
   - Fallback if M0 fails: see *M0 failure policy* — it is a stop, not a substitution.
 - Personal tool. One user. No App Store.
-- **Language coverage is a hard criterion**, stated alongside on-device-only: European
-  languages including the Nordics. Parakeet v3 covers the **24 EU official languages plus
-  Russian and Ukrainian** — which means **Norwegian and Icelandic are NOT supported**, since
-  neither country is in the EU. Swedish, Danish and Finnish are. This is structural, so a
-  point release will not fix it. Swedish/English is the primary case and is covered; if
-  Norwegian is ever required, Parakeet cannot serve it and the only alternative is Whisper,
-  which detects one language per ~30 s window and so degrades exactly the mid-note
-  code-switching this app exists to capture.
+- **Language coverage is a hard criterion**, stated alongside on-device-only:
+  **Norwegian, Swedish, Danish and English are non-negotiable**, plus European languages
+  generally. **This changed the engine.** Parakeet TDT v3 covers the 24 EU official
+  languages plus Russian and Ukrainian, so it has no Norwegian — Norway is not in the EU,
+  and that is structural rather than a gap awaiting a patch. FluidAudio wraps only Parakeet
+  and Nemotron, so the whole library went with it. **The engine is now Whisper via
+  WhisperKit**, which covers no/nb, sv, da, en and ~95 more.
+  - *Price of that, stated plainly:* Whisper decides **one language per ~30 s window**, so a
+    sentence switching Swedish→English mid-flow is forced into one of them. Parakeet handled
+    exactly that case better. A hard requirement beat a quality preference: a Norwegian note
+    that cannot be transcribed at all is worse than occasional language-flip artefacts.
+    Read success criterion 5 with this in mind.
 - No editing step **in this app**. Obsidian's share target has its own destination-and-review
   step; out of our control, accepted.
 - **Recording must continue with the screen locked.** Whether it can also *start* from a
@@ -236,10 +240,9 @@ note," and that case no longer exists.
 [Action Button / Control → foregrounds app] → AVAudioSession .record activated
   → AVAudioEngine tap → 16 kHz mono Int16 WAV segments on disk (durable)
   → Silero VAD proposes boundaries
-  → INCREMENTAL Parakeet inference on the ANE as segments close, fed to
-     FluidAudio's SlidingWindowAsrManager 12 s at a time (a FEED size, not an
-     overlap: the library owns overlap and returns token timings already
-     mapped onto the whole recording's timeline)
+  → INCREMENTAL Whisper inference on the ANE as segments close, fed to
+     WhisperKit 30 s at a time (Whisper's native window; separate transcribe
+     calls share no context, so slice edges can clip a word — an M0 check)
   → [Stop via AudioRecordingIntent from Lock Screen]
      → beginBackgroundTask() taken FIRST
      → engine tap KEEPS RUNNING, buffers discarded (stop = stop appending to WAV)
@@ -248,9 +251,12 @@ note," and that case no longer exists.
   → [user taps Share] → ShareLink (file URL, declared md UTI) → Obsidian
 ```
 
-**Feed rule.** Audio goes to `SlidingWindowAsrManager.transcribeChunk(_:isLastChunk:)` in
-12 s slices, straight through with no overlap, `isLast` on the final slice so it flushes.
-Two layers of window logic would fight, so there is deliberately only one.
+**Feed rule.** Audio goes to `WhisperKit.transcribe(audioArray:decodeOptions:)` in **30 s
+slices** — Whisper's native window, so the engine is not padding or splitting at a boundary
+we did not choose. `DecodingOptions(language: nil, wordTimestamps: true)`: nil means
+auto-detect, which is the whole point of the engine change, and word timestamps give the
+timings the paragraph rule and deferred audio-seek both need. Slice timings are relative to
+the slice, so they are offset onto the recording's timeline by the transcriber.
 
 ~~**Overlap merge.**~~ **DELETED.** We wrote a token-alignment merge before discovering
 FluidAudio already does this, and better — it owns the seams and returns timings on the
@@ -406,8 +412,9 @@ says nothing about output. Confirm in M0.
 - ~~Does a shared `.md` become a note or an attachment?~~ **CLOSED 2026-09-21: it becomes a
   note.** Confirmed on device. Still open, narrower: **does YAML frontmatter survive**, and
   **does `ShareLink`'s payload hit the same branch as Files'?**
-- ~~Does `AsrManager` return a detected language code?~~ **CLOSED: no.** `ASRResult`
-  exposes text, confidence and `tokenTimings`. The frontmatter `language` field is dropped.
+- ~~Does the ASR return a detected language code?~~ **CLOSED: yes, now.** Parakeet did not;
+  Whisper's `TranscriptionResult.language` does. The frontmatter `language` field is back,
+  populated for real rather than guessed.
 - ~~Does FluidAudio apply its own internal windowing?~~ **CLOSED: yes.**
   `SlidingWindowAsrManager.transcribeChunk(_:isLastChunk:)` takes audio a slice at a time
   and returns `tokenTimings` mapped onto the whole recording's timeline, seams handled.

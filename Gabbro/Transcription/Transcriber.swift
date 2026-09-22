@@ -2,18 +2,15 @@ import Foundation
 
 /// The ASR boundary.
 ///
-/// Streaming, not one-shot. FluidAudio's `SlidingWindowAsrManager` already
-/// takes audio a slice at a time and returns token timings positioned on the
-/// whole recording's timeline, with the seams handled internally — so we feed
-/// it in order rather than cutting overlapping windows and stitching the
-/// results ourselves. Our own chunker and token-alignment merge were deleted
-/// when that was discovered; the reuse ladder says stop at the first rung
-/// that holds, and this holds.
+/// Streaming, not one-shot: audio is fed a slice at a time as VAD segments
+/// close, which is what keeps inference inside the live audio session instead
+/// of owing minutes of it after Stop.
 ///
-/// The protocol still exists because FluidAudio is pre-1.0 and churning, and
-/// because `StubTranscriber` behind it is what let the whole pipeline be
-/// proven end to end before the model was real. Note the M0 failure policy
-/// though: a failed gate is a project stop, not a substitution.
+/// The boundary has now earned itself twice over. It absorbed the engine
+/// changing outright -- Parakeet/FluidAudio to Whisper/WhisperKit, forced by
+/// Norwegian -- without anything above it moving, and `StubTranscriber` behind
+/// it is what let the whole capture, render and share path be proven before
+/// any model existed.
 public protocol Transcriber: Sendable {
     /// Loads the model. Expensive; call once. Cold load time is an M0
     /// measurement, reported separately so it cannot skew the speed gate.
@@ -37,12 +34,9 @@ public protocol Transcriber: Sendable {
 
     /// Whether the backing model reports a detected language at all.
     ///
-    /// Parakeet v3 takes no language *input* — detection is strictly
-    /// automatic, no prompt prefix and no flag. As of FluidAudio 0.15.x it
-    /// does not appear to surface the detected code as *output* either:
-    /// `ASRResult` exposes text, confidence and token timings. So this is
-    /// false and `MarkdownRenderer` omits the frontmatter `language` field
-    /// entirely rather than emitting a guess.
+    /// True for Whisper, which returns the language it detected, so the
+    /// frontmatter `language` field can be populated for real. It was false
+    /// under Parakeet, which detects internally but surfaces nothing.
     nonisolated var reportsDetectedLanguage: Bool { get }
 }
 

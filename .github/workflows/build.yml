@@ -80,9 +80,10 @@ jobs:
           # debugged for a round.
           echo "FILE_STAMP=b${{ github.run_number }}-${SHORT_SHA}" >> $GITHUB_ENV
 
-      # Surfaced as its own step so a FluidAudio resolution failure reads as
-      # "the pinned dependency moved" rather than a compile error 20 lines
-      # into a build log. It is pre-1.0 and pinned to an exact version.
+      # Surfaced as its own step so a dependency resolution failure reads as
+      # "the package moved" rather than a compile error 20 lines into a build
+      # log. WhisperKit's repo has already moved once (argmaxinc/WhisperKit ->
+      # argmaxinc/argmax-oss-swift), so this is not hypothetical.
       - name: Resolve Swift packages
         run: |
           xcodebuild -resolvePackageDependencies \
@@ -91,28 +92,28 @@ jobs:
           echo "--- resolved ---"
           cat Gabbro.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved || true
 
-      # Print FluidAudio's REAL public ASR surface from the checked-out source.
+      # Print the dependency's REAL public API from the checked-out source.
       #
-      # The published docs describe `main`, not the tag we pin, and a build
-      # written against them failed on every single signature:
-      # SlidingWindowAsrManager(models:) takes no such argument and
-      # transcribeChunk does not exist on it in 0.15.6. The source is right
-      # here on the runner, so read it instead of guessing.
-      - name: Dump FluidAudio public ASR API
+      # Learned the hard way: a build written against FluidAudio's published
+      # docs failed on every single signature, because those docs described
+      # `main` while the package was pinned to a tag. The source is right here
+      # on the runner. Read it instead of guessing.
+      - name: Dump WhisperKit public API
         run: |
-          SRC=build/SourcePackages/checkouts/FluidAudio/Sources/FluidAudio
-          if [ ! -d "$SRC" ]; then
-            echo "::warning::FluidAudio checkout not found; skipping API dump"
+          SRC=$(find build/SourcePackages/checkouts -maxdepth 3 -type d -name WhisperKit -path "*Sources*" | head -1)
+          if [ -z "$SRC" ]; then
+            echo "::warning::WhisperKit checkout not found; skipping API dump"
+            ls -1 build/SourcePackages/checkouts 2>/dev/null || true
             exit 0
           fi
-          echo "### FluidAudio public ASR API (as checked out)" >> $GITHUB_STEP_SUMMARY
+          echo "### WhisperKit public API (as checked out)" >> $GITHUB_STEP_SUMMARY
           echo '```swift' >> $GITHUB_STEP_SUMMARY
-          grep -rhn -E "^\s*public (final )?(actor|class|struct|enum|protocol|init|func|var|let)"             "$SRC/ASR" 2>/dev/null | sed 's/^[0-9]*://' | sort -u >> $GITHUB_STEP_SUMMARY || true
+          grep -rhn -E "^\s*public (final )?(actor|class|struct|enum|protocol|init|func|var|let)"             "$SRC" 2>/dev/null | sed 's/^[0-9]*://' | sort -u | head -200 >> $GITHUB_STEP_SUMMARY || true
           echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "--- ASRResult / TokenTiming shape ---"
-          sed -n '1,120p' "$SRC/ASR/AsrTypes.swift" 2>/dev/null || true
-          echo "--- files ---"
-          ls -1 "$SRC/ASR" 2>/dev/null || true
+          echo "--- TranscriptionResult / TranscriptionSegment / WordTiming ---"
+          grep -rn -A25 "public struct TranscriptionResult\|open class TranscriptionResult\|public struct TranscriptionSegment\|public struct WordTiming"             "$SRC/Core/Models.swift" 2>/dev/null | head -120 || true
+          echo "--- DecodingOptions ---"
+          grep -rn -A40 "public struct DecodingOptions" "$SRC/Core/Models.swift" 2>/dev/null | head -60 || true
 
       # Unsigned. Signing happens on Windows, at sideload time, with your free
       # Apple ID — the CI runner has no certificate and does not need one.

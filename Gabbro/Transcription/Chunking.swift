@@ -11,12 +11,17 @@ import Foundation
 /// layers of window logic would fight.
 public enum Chunking {
     /// Audio handed over per call under normal conditions.
-    public static let feedSeconds: Double = 12.0
+    ///
+    /// 30 s because that is Whisper's native window. Feeding anything else
+    /// means the engine pads or splits internally at a boundary we did not
+    /// choose, and a word landing on a slice edge can be clipped -- separate
+    /// `transcribe` calls share no context, unlike one long array.
+    public static let feedSeconds: Double = 30.0
 
     /// Larger slices under `.serious` thermal pressure, paired with a 50% duty
     /// cycle. Backlog then grows at ~0.5x real time, tripping the 8 s promise
     /// threshold after roughly 16 s of continued speech.
-    public static let thermalFeedSeconds: Double = 30.0
+    public static let thermalFeedSeconds: Double = 60.0
 
     /// Below this there is nothing worth a disk read and an inference call.
     /// The final slice is flagged `isLast` instead, so the transcriber flushes

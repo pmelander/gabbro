@@ -30,7 +30,11 @@ public final class CaptureModel: RecordingControlHandling {
         // proved the whole capture/render/share path before the model existed,
         // and six crash-fix cycles ran through it without the model muddying
         // the picture — but nothing reaches it now.
-        let transcriber = StubTranscriber()
+        // The real engine. StubTranscriber stays in the codebase because it
+        // proved the whole capture/render/share path before any model existed,
+        // and several crash-fix cycles ran through it cleanly -- but nothing
+        // reaches it now.
+        let transcriber = WhisperTranscriber()
         self.coordinator = TranscriptionCoordinator(transcriber: transcriber)
         self.modelIdentifier = transcriber.modelIdentifier
     }
