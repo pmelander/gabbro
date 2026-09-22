@@ -62,6 +62,23 @@ struct CaptureView: View {
                         }
                 }
                 .listStyle(.plain)
+
+                if let summary = model.lastPurgeSummary {
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: "sparkles")
+                        Text(summary).font(.caption)
+                        Spacer()
+                        Button("OK") { model.dismissPurgeSummary() }.font(.caption)
+                    }
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal)
+                }
+
+                if model.storeBytes > 0 {
+                    Text("\(ByteCountFormatter.string(fromByteCount: model.storeBytes, countStyle: .file)) on device · audio kept \(JobStore.retentionDays) days")
+                        .font(.caption2).foregroundStyle(.tertiary)
+                        .padding(.bottom, 4)
+                }
             }
             .padding(.top, 32)
             .navigationTitle("Gabbro")
@@ -75,7 +92,12 @@ struct CaptureView: View {
             // queue moves whenever the app is in front. Without this a
             // "Queued" row would sit there until the user tapped something.
             .onChange(of: scenePhase) { _, phase in
-                if phase == .active { Task { await model.resumeQueue() } }
+                if phase == .active {
+                    Task {
+                        await model.resumeQueue()
+                        await model.runRetention()
+                    }
+                }
             }
             .confirmationDialog(
                 "Delete this recording?",
@@ -193,6 +215,12 @@ struct CaptureView: View {
                     Text("Transcribing — \(Int((model.transcribeProgress ?? 0) * 100))%  ·  on device")
                         .font(.caption).foregroundStyle(.secondary)
                 }
+            } else if let purged = job.audioPurgedAt {
+                Label(
+                    "Audio removed \(purged.formatted(.relative(presentation: .named))) · transcript kept",
+                    systemImage: "clock.badge.xmark"
+                )
+                .font(.caption).foregroundStyle(.tertiary)
             } else if job.state == .captured {
                 Label("Queued — will transcribe when Gabbro is open",
                       systemImage: "clock.arrow.circlepath")

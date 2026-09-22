@@ -68,6 +68,11 @@ public struct RecordingJob: Codable, Identifiable, Sendable, Equatable {
     public var sharedAt: Date?
     /// Set when the 10-second-at-Stop promise was withdrawn, with the reason.
     public var promiseWithdrawnReason: String?
+    /// When the retention sweep removed this job's audio. The transcript and
+    /// the row survive; only the recording goes. Recorded explicitly rather
+    /// than inferred from an empty segment list, because a job that captured
+    /// nothing also has no segments and means something entirely different.
+    public var audioPurgedAt: Date?
 
     public init(id: UUID = UUID(), createdAt: Date = Date(), inputRoute: InputRoute = .builtIn) {
         self.id = id
@@ -89,9 +94,12 @@ public struct RecordingJob: Codable, Identifiable, Sendable, Equatable {
         segments.reduce(0) { $0 + $1.untranscribedSeconds }
     }
 
-    /// Audio is the only recovery path for a bad transcript, so it survives
-    /// until an explicit purge — never an automatic one.
+    /// Audio is the only recovery path for a bad transcript, so only work
+    /// that has reached a good end is eligible. A failed or queued job keeps
+    /// its audio indefinitely — that recording is the sole way to retry it.
     public var isPurgeable: Bool {
         state == .shared || state == .ready
     }
+
+    public var hasAudio: Bool { !segments.isEmpty }
 }

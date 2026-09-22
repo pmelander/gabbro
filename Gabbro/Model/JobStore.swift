@@ -22,6 +22,13 @@ public actor JobStore {
     private let log = Logger(subsystem: "com.pmelander.gabbro", category: "JobStore")
     private let fm = FileManager.default
 
+    /// How long audio is kept after recording.
+    ///
+    /// Only the AUDIO expires. The transcript, the note and the row all
+    /// survive — audio accumulates at roughly 1.9 MB/min and is the only
+    /// thing here that grows without bound.
+    public static let retentionDays = 30
+
     /// Free space below which a new recording is refused outright.
     public static let minimumFreeBytesToStart: Int64 = 250 * 1_024 * 1_024
     /// Free space at which an in-flight recording finalizes its segment and stops.
@@ -203,16 +210,49 @@ public actor JobStore {
         all().filter { $0.state == .captured || $0.state == .transcribing }
     }
 
-    /// Explicit purge only. Retention default is 30 days, manual — never a
-    /// quiet automatic sweep, because the audio is the sole recovery path.
     public func purgeAudio(for id: UUID) throws {
-        guard var job = jobs[id], job.isPurgeable else { return }
+        guard var job = jobs[id], job.isPurgeable, job.hasAudio else { return }
         for segment in job.segments {
             try? fm.removeItem(at: audioDirectory.appendingPathComponent(segment.filename))
         }
         job.segments = []
+        job.audioPurgedAt = Date()
         jobs[id] = job
         try save()
+    }
+
+    /// Retention sweep. Removes audio older than `retentionDays` from jobs
+    /// that reached a good end, and leaves everything else alone.
+    ///
+    /// Deliberately not silent: it returns what it did so the UI can say so,
+    /// and each affected row keeps an `audioPurgedAt` marker. The design's
+    /// original position was that purging should never be automatic, because
+    /// the recording is the only recovery path for a bad transcript — the
+    /// compromise is that it only ever touches work that already succeeded,
+    /// and it never hides that it happened.
+    ///
+    /// - Returns: (jobs purged, bytes freed)
+    @discardableResult
+    public func purgeExpiredAudio(now: Date = Date()) throws -> (count: Int, bytes: Int64) {
+        let cutoff = now.addingTimeInterval(-Double(Self.retentionDays) * 86_400)
+        var count = 0
+        var bytes: Int64 = 0
+
+        for (id, job) in jobs where job.isPurgeable && job.hasAudio {
+            // Age from when it was recorded: predictable, and explainable as
+            // "30 days after you recorded it".
+            guard job.createdAt < cutoff else { continue }
+            for segment in job.segments {
+                let url = audioDirectory.appendingPathComponent(segment.filename)
+                bytes += Int64((try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+            }
+            try purgeAudio(for: id)
+            count += 1
+        }
+        if count > 0 {
+            log.notice("Retention: purged audio from \(count, privacy: .public) job(s)")
+        }
+        return (count, bytes)
     }
 
     /// Removes a job and its audio entirely.

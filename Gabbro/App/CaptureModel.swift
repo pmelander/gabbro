@@ -55,6 +55,13 @@ public final class CaptureModel: RecordingControlHandling {
     /// progress against the actual row rather than a detached bar.
     public private(set) var transcribingJobID: UUID?
 
+    /// Set when the last retention sweep actually removed something, so it
+    /// can be reported rather than happening quietly behind the user's back.
+    public private(set) var lastPurgeSummary: String?
+
+    /// Total on-disk size of audio, notes and diagnostics.
+    public private(set) var storeBytes: Int64 = 0
+
     /// Non-nil while a transcript is being caught up, 0...1.
     ///
     /// A 25-minute recording can take many minutes to transcribe after Stop.
@@ -116,6 +123,7 @@ public final class CaptureModel: RecordingControlHandling {
             // in its own task so the UI comes up immediately and can show the
             // download. Pending jobs wait for it — they need the model too.
             Task { await self.prepareModel() }
+            await runRetention()
         } catch {
             lastError = error.localizedDescription
         }
@@ -324,6 +332,22 @@ public final class CaptureModel: RecordingControlHandling {
     /// only if it actually drains without being asked. Transcription can take
     /// minutes and cannot finish inside a background window, so the foreground
     /// is where it happens.
+    /// Retention sweep plus a refreshed size figure. Runs at launch and on
+    /// every foreground, alongside the queue.
+    public func runRetention() async {
+        if let result = try? await JobStore.shared.purgeExpiredAudio(), result.count > 0 {
+            let mb = Double(result.bytes) / (1024 * 1024)
+            lastPurgeSummary = String(
+                format: "Freed %.0f MB — audio older than %d days removed from %d recording(s). Transcripts kept.",
+                mb, JobStore.retentionDays, result.count
+            )
+            jobs = await JobStore.shared.all()
+        }
+        storeBytes = await JobStore.shared.totalStoreBytes()
+    }
+
+    public func dismissPurgeSummary() { lastPurgeSummary = nil }
+
     public func resumeQueue() async {
         guard modelState.isReady, !lifecycleBusy, transcribingJobID == nil else { return }
         guard !(await JobStore.shared.pendingWork().isEmpty) else { return }
