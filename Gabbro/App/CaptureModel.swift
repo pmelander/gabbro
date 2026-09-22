@@ -22,10 +22,11 @@ public final class CaptureModel: RecordingControlHandling {
     private var activity: Activity<RecordingActivityAttributes>?
 
     private init() {
-        // Swap to ParakeetTranscriber() once the M0 step 1 checklist in
-        // ParakeetTranscriber.swift is answered. The stub is the sanctioned
-        // early fake — pipeline first, model second.
-        self.coordinator = TranscriptionCoordinator(transcriber: StubTranscriber())
+        // The real thing. StubTranscriber stays in the codebase because it
+        // proved the whole capture/render/share path before the model existed,
+        // and six crash-fix cycles ran through it without the model muddying
+        // the picture — but nothing reaches it now.
+        self.coordinator = TranscriptionCoordinator(transcriber: ParakeetTranscriber())
     }
 
     // MARK: - RecordingControlHandling

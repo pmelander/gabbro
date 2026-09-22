@@ -80,6 +80,10 @@ public actor TranscriptionCoordinator {
         // One immutable copy of the segment list, and plain value locals for
         // everything that changes. Nothing below touches `input` again until
         // `assemble` builds the result. See the type doc for why.
+        // Streaming transcriber: clear any state from a previous recording
+        // before feeding this one, or its timeline continues from the last.
+        await transcriber.reset()
+
         let segments = input.segments
         var progress = segments.map(\.transcribedFrames)
         var languages = input.detectedLanguages
@@ -94,15 +98,13 @@ public actor TranscriptionCoordinator {
             let segment = segments[index]
             let url = JobStore.shared.audioDirectory.appendingPathComponent(segment.filename)
             var offset = progress[index]
+            let isFinalSegment = index == segments.count - 1
 
             while offset < segment.frameCount {
                 let backlog = Self.backlogSeconds(segments: segments, progress: progress)
 
                 if ThermalPolicy.shouldSuspend {
                     log.notice("Thermal suspend at \(backlog, privacy: .public)s backlog")
-                    // Fire-and-forget: an await here would be another
-                    // suspension inside the region that mutates this
-                    // function's locals, which is the shape that crashed it.
                     let note = "thermal suspend at \(Int(backlog))s backlog"
                     Task { await M0Telemetry.shared.noteEvent(note) }
                     return Self.assemble(
@@ -121,11 +123,12 @@ public actor TranscriptionCoordinator {
                 }
 
                 let remaining = segment.frameCount - offset
-                let count = min(ThermalPolicy.chunkCapFrames, remaining)
+                let count = min(ThermalPolicy.feedFrames, remaining)
+                let isFinalSlice = isFinalSegment && count == remaining
 
-                // A sliver shorter than the model's useful window is not worth
-                // a disk read and an inference call. Consume it and stop.
-                guard count >= Chunking.minChunkFrames else {
+                // A sliver is not worth a disk read, unless it is the very
+                // last slice -- the transcriber needs `isLast` to flush.
+                guard count >= Chunking.minFeedFrames || isFinalSlice else {
                     progress[index] = segment.frameCount
                     break
                 }
@@ -136,45 +139,35 @@ public actor TranscriptionCoordinator {
                     )
                     // Wall clock around the inference call only. This ratio is
                     // the speed gate, and the telemetry keeps only the chunks
-                    // that ran while the device was locked — a foreground
+                    // that ran while the device was locked -- a foreground
                     // measurement would flatter the design into passing.
                     let started = ContinuousClock.now
-                    let result = try await transcriber.transcribe(samples: samples)
+                    let result = try await transcriber.feed(samples, isLast: isFinalSlice)
                     chunkTimings.append((
                         audioSeconds: Double(count) / Double(WAVWriter.sampleRate),
                         wallSeconds: Self.seconds(ContinuousClock.now - started)
                     ))
                     maxBacklog = max(maxBacklog, backlog)
 
-                    tokens = OverlapMerge.merge(tokens, with: result.tokens)
+                    // No merge step. Timings arrive on the whole recording's
+                    // timeline with the seams already handled, so appending in
+                    // feed order is the whole of it.
+                    tokens.append(contentsOf: result.tokens)
                     for code in result.languages where !languages.contains(code) {
                         languages.append(code)
                     }
                 } catch {
-                    // Retry is per chunk; completed chunks are kept. Audio is
+                    // Retry is per slice; completed slices are kept. Audio is
                     // always retained, so nothing here is terminal.
-                    log.error("Chunk failed: \(error.localizedDescription, privacy: .public)")
+                    log.error("Slice failed: \(error.localizedDescription, privacy: .public)")
                     return Self.assemble(
                         input, progress: progress, languages: languages, transcript: nil,
                         state: .failed, failure: error.localizedDescription
                     )
                 }
 
-                // Advance by the chunk minus its overlap, so the next window
-                // re-reads the tail the merge aligns on.
-                //
-                // Two ways this loop must end. An earlier version wrote
-                // `max(1, count - overlapFrames)`, which turned "no forward
-                // progress" into "advance one sample": a recording shorter
-                // than about 2x the overlap ground through tens of thousands
-                // of iterations until iOS killed the app. Short recordings
-                // were the worst case, which is what a test tap produces.
-                let advance = count - Chunking.overlapFrames
-                if count == remaining || advance <= 0 {
-                    progress[index] = segment.frameCount
-                    break
-                }
-                offset += advance
+                // Straight advance, no overlap to back up over.
+                offset += count
                 progress[index] = offset
 
                 await ThermalPolicy.yieldIfThrottled()
@@ -256,13 +249,13 @@ enum ThermalPolicy {
 
     static var shouldSuspend: Bool { state == .critical }
 
-    /// Under `.serious`, raise the cap to 30 s and halve the duty cycle.
+    /// Under `.serious`, raise the feed size to 30 s and halve the duty cycle.
     /// Backlog then grows at ~0.5x real time, tripping the 8 s promise
     /// threshold after roughly 16 s of continued speech.
-    static var chunkCapFrames: Int {
+    static var feedFrames: Int {
         state == .serious
-            ? Int(Chunking.thermalCapSeconds * Double(WAVWriter.sampleRate))
-            : Chunking.capFrames
+            ? Int(Chunking.thermalFeedSeconds * Double(WAVWriter.sampleRate))
+            : Chunking.feedFrames
     }
 
     /// The other half of the 50% duty cycle: yield long enough to keep the ANE
